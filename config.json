@@ -1,0 +1,63 @@
+{
+  "api": {
+    "provider": "gemini-openai"
+  },
+  "api_gemini": {
+    "provider": "gemini",
+    "credentials_path": "/Users/yongqiuwu/works/github/a_daily_strategy/tencent-gemini-auth.json",
+    "project_id": "tencent-gemini-omd11",
+    "location": "us-central1",
+    "model": "gemini-2.5-flash"
+  },
+  "api_gemini-openai": {
+    "provider": "gemini-openai",
+    "api_key": "your-api-key",
+    "base_url": "http://127.0.0.1:9001/v1",
+    "model": "gemini-3-flash"
+  },
+  "api_deepseek": {
+    "provider": "deepseek",
+    "api_key": "sk-BYHDKykUZEdYjVdF2hacx2Wi13YNth2sj9TM2HxCZxJMOfzy",
+    "base_url": "https://api.lkeap.cloud.tencent.com/v1",
+    "model": "deepseek-v3.1"
+  },
+  "portfolio": [
+    {
+      "symbol": "159369",
+      "name": "创50ETF",
+      "cost_price": 0.820,
+      "position_size": 12602
+    },
+    {
+      "symbol": "513300",
+      "name": "纳斯达克etf",
+      "cost_price": 2.396,
+      "position_size": 10900
+    },
+    {
+      "symbol": "601127",
+      "name": "赛力斯",
+      "cost_price": 125.587,
+      "position_size": 125.320
+    }
+  ],
+  "analysis": {
+    "lookback_days": 120,
+    "ma_short": 20,
+    "ma_long": 60
+  },
+  "selection_rules": {
+    "enabled": true,
+    "min_change": 2.0,
+    "max_change": 8.0,
+    "min_volume_ratio": 1.5,
+    "min_turnover": 3.0,
+    "max_turnover": 15.0,
+    "min_mcap_b": 50,
+    "max_mcap_b": 1000,
+    "exclude_loss_making": true,
+    "max_candidates_rough": 30,
+    "min_score": 70,
+    "max_final_candidates": 3
+  }
+}
