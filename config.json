@@ -24,27 +24,43 @@
   "portfolio": [
     {
       "symbol": "159369",
-      "name": "创50ETF",
+      "name": "创业板50ETF",
+      "type": "etf",
       "cost_price": 0.820,
       "position_size": 12602
     },
     {
-      "symbol": "513300",
-      "name": "纳斯达克etf",
-      "cost_price": 2.396,
-      "position_size": 10900
+      "symbol": "159934",
+      "name": "黄金ETF",
+      "type": "etf",
+      "cost_price": 9.935,
+      "position_size": 10000
     },
     {
-      "symbol": "601127",
-      "name": "赛力斯",
-      "cost_price": 125.587,
-      "position_size": 125.320
+      "symbol": "159352",
+      "name": "A500ETF南方",
+      "type": "etf",
+      "cost_price": 1.281,
+      "position_size": 10000
+    },
+    {
+      "symbol": "513300",
+      "name": "纳斯达克ETF",
+      "type": "etf",
+      "cost_price": 2.396,
+      "position_size": 10900
     }
   ],
   "analysis": {
     "lookback_days": 120,
     "ma_short": 20,
     "ma_long": 60
+  },
+  "monitor": {
+    "update_interval_seconds": 300,
+    "market_index_code": "sh000001",
+    "watch_list": [
+    ]
   },
   "selection_rules": {
     "enabled": true,
