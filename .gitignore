@@ -44,3 +44,5 @@ Thumbs.db
 # config.json
 *.md
 *.html
+
+test_*.py

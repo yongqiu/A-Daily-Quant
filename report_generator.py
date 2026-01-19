@@ -7,32 +7,39 @@ def generate_html_report(md_content_holdings: str, md_content_candidates: str, o
     Convert separate Markdown content sections to a styled HTML report with tabs
     """
     
-    # Custom CSS for a dashboard look
+    # Custom CSS for a dashboard look (Dark Mode)
     css = """
     <style>
         :root {
-            --primary-color: #2563eb;
-            --bg-color: #f8fafc;
-            --card-bg: #ffffff;
-            --text-main: #1e293b;
-            --text-muted: #64748b;
-            --border-color: #e2e8f0;
-            --success-color: #16a34a;
-            --danger-color: #dc2626;
-            --warning-color: #d97706;
-            --tab-active-bg: #2563eb;
-            --tab-active-text: #ffffff;
-            --tab-inactive-bg: #e2e8f0;
-            --tab-inactive-text: #475569;
+            --bg-color: #0a0c10;
+            --card-bg: #161a22;
+            --border-color: #30363d;
+            
+            --text-primary: #f0f6fc;
+            --text-secondary: #8b949e;
+            --text-muted: #6e7681;
+            
+            --accent-color: #58a6ff;
+            --accent-dim: rgba(56, 139, 253, 0.1);
+            
+            --success-color: #3fb950;
+            --danger-color: #f85149;
+            --warning-color: #d29922;
+            
+            --tab-active-bg: rgba(56, 139, 253, 0.15);
+            --tab-active-text: #58a6ff;
+            --tab-inactive-bg: transparent;
+            --tab-inactive-text: #8b949e;
         }
         
         body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
             line-height: 1.6;
-            color: var(--text-main);
+            color: var(--text-primary);
             background-color: var(--bg-color);
             margin: 0;
-            padding: 20px;
+            padding: 40px 20px;
+            -webkit-font-smoothing: antialiased;
         }
         
         .container {
@@ -42,112 +49,139 @@ def generate_html_report(md_content_holdings: str, md_content_candidates: str, o
         
         /* Headers */
         h1 {
-            font-size: 2.2rem;
-            color: #0f172a;
-            border-bottom: 3px solid var(--primary-color);
-            padding-bottom: 15px;
-            margin-bottom: 30px;
+            font-size: 2rem;
+            color: var(--text-primary);
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 20px;
+            margin-bottom: 40px;
             text-align: center;
+            letter-spacing: -0.5px;
         }
         
-        h2 { 
-            font-size: 1.5rem; 
-            background: var(--card-bg);
-            padding: 15px 20px;
-            border-radius: 8px 8px 0 0;
-            border-top: 4px solid var(--primary-color);
-            margin-top: 40px;
-            margin-bottom: 0;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+        h2 {
+            font-size: 1.5rem;
+            color: var(--accent-color);
+            margin-top: 50px;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid rgba(88, 166, 255, 0.2);
             display: flex;
             align-items: center;
         }
         
         h3 {
-            font-size: 1.1rem;
-            color: #334155;
-            margin-top: 20px;
-            margin-bottom: 10px;
+            font-size: 1.15rem;
+            color: var(--text-primary);
+            margin-top: 30px;
+            margin-bottom: 15px;
             font-weight: 600;
-            border-left: 3px solid #cbd5e1;
-            padding-left: 10px;
         }
         
         /* Tables */
         table {
             width: 100%;
-            border-collapse: collapse;
+            border-collapse: separate;
+            border-spacing: 0;
             background: var(--card-bg);
             border-radius: 8px;
             overflow: hidden;
-            box-shadow: 0 2px 6px rgba(0,0,0,0.05);
-            margin: 15px 0;
+            border: 1px solid var(--border-color);
+            margin: 20px 0;
             font-size: 0.95rem;
         }
         
         th, td {
-            padding: 10px 15px;
+            padding: 12px 16px;
             text-align: left;
             border-bottom: 1px solid var(--border-color);
         }
         
         th {
-            background-color: #f1f5f9;
+            background-color: #21262d;
             font-weight: 600;
-            color: #475569;
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+            text-transform: uppercase;
         }
         
         tr:last-child td { border-bottom: none; }
+        tr:hover td { background-color: rgba(110, 118, 129, 0.05); }
         
         /* Lists */
-        ul { 
-            padding-left: 20px; 
-            background: var(--card-bg);
-            padding: 15px 15px 15px 35px;
-            border-radius: 8px;
-            box-shadow: 0 1px 2px rgba(0,0,0,0.05);
-            margin: 10px 0;
+        ul {
+            padding-left: 20px;
+            color: var(--text-secondary);
+            margin: 15px 0;
         }
         
-        li { margin-bottom: 6px; }
+        li { margin-bottom: 8px; }
         
         /* Paragraphs & Text */
-        p { margin-bottom: 1em; }
+        p { margin-bottom: 1.2em; color: #c9d1d9; }
         
-        strong { font-weight: 700; color: #0f172a; }
+        strong { font-weight: 600; color: var(--text-primary); }
+        
+        /* Blockquotes */
+        blockquote {
+            border-left: 4px solid var(--accent-color);
+            margin: 20px 0;
+            padding: 10px 20px;
+            color: var(--text-secondary);
+            background: rgba(88, 166, 255, 0.05);
+            border-radius: 0 4px 4px 0;
+        }
+        
+        /* Code */
+        code {
+            background: rgba(110, 118, 129, 0.2);
+            padding: 0.2em 0.4em;
+            border-radius: 6px;
+            font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+            font-size: 0.85em;
+        }
         
         /* Tab Styling */
         .tabs {
             display: flex;
-            margin-bottom: 20px;
-            border-bottom: 2px solid var(--border-color);
+            margin-bottom: 30px;
+            border-bottom: 1px solid var(--border-color);
+            gap: 10px;
         }
         
         .tab-button {
-            padding: 12px 24px;
-            font-size: 1rem;
-            font-weight: 600;
+            padding: 12px 20px;
+            font-size: 0.95rem;
+            font-weight: 500;
             cursor: pointer;
-            border: none;
-            background-color: var(--tab-inactive-bg);
+            border: 1px solid transparent;
+            background-color: transparent;
             color: var(--tab-inactive-text);
-            border-radius: 8px 8px 0 0;
-            margin-right: 5px;
-            transition: all 0.3s ease;
+            border-radius: 6px 6px 0 0;
+            transition: all 0.2s ease;
+            margin-bottom: -1px;
         }
         
         .tab-button:hover {
-            background-color: #cbd5e1;
+            color: var(--text-primary);
         }
         
         .tab-button.active {
-            background-color: var(--tab-active-bg);
-            color: var(--tab-active-text);
+            background-color: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-bottom-color: var(--card-bg);
+            color: var(--text-primary);
+            font-weight: 600;
         }
         
         .tab-content {
             display: none;
-            animation: fadeIn 0.5s;
+            animation: fadeIn 0.3s ease-out;
+            background: var(--card-bg); /* Add card background to content */
+            padding: 30px;
+            border-radius: 0 0 8px 8px; /* Round bottom corners */
+            border: 1px solid var(--border-color);
+            border-top: none; /* Align with tabs */
+            margin-top: -1px; /* Overlap border */
         }
         
         .tab-content.active {
@@ -155,13 +189,8 @@ def generate_html_report(md_content_holdings: str, md_content_candidates: str, o
         }
         
         @keyframes fadeIn {
-            from { opacity: 0; }
-            to { opacity: 1; }
-        }
-        
-        /* Special styling for the Beta Shield section (usually first h2) */
-        h2:first-of-type {
-            border-top-color: var(--warning-color);
+            from { opacity: 0; transform: translateY(5px); }
+            to { opacity: 1; transform: translateY(0); }
         }
         
         /* Footer */
@@ -176,10 +205,11 @@ def generate_html_report(md_content_holdings: str, md_content_candidates: str, o
         
         /* Responsive */
         @media (max-width: 600px) {
-            body { padding: 10px; }
-            h1 { font-size: 1.8rem; }
-            h2 { font-size: 1.3rem; }
-             table { display: block; overflow-x: auto; }
+            body { padding: 20px 10px; }
+            h1 { font-size: 1.5rem; }
+            h2 { font-size: 1.2rem; }
+            table { display: block; overflow-x: auto; white-space: nowrap; }
+            .tab-button { padding: 10px 15px; font-size: 0.9rem; }
         }
     </style>
     <script>

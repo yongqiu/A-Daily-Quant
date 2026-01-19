@@ -7,8 +7,108 @@ from typing import List, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 
-from data_fetcher import fetch_stock_data, calculate_start_date
+from data_fetcher import fetch_stock_data, calculate_start_date, fetch_sector_data, fetch_stock_news
 from indicator_calc import calculate_indicators, get_latest_metrics
+import database
+
+def get_selection_rules(config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Get selection rules, merging config.json with database overrides.
+    Database params take precedence.
+    """
+    # Base rules from file
+    rules = config.get('selection_rules', {}).copy()
+    
+    # Override with DB params if available
+    try:
+        strategy = database.get_strategy_by_slug('candidate_growth')
+        if strategy and strategy.get('params'):
+            db_params = strategy['params']
+            print("⚙️ Loaded dynamic selection rules from database.")
+            
+            # Map DB string values back to correct types
+            type_mapping = {
+                'enabled': lambda x: x.lower() == 'true',
+                'min_change': float,
+                'max_change': float,
+                'min_volume_ratio': float,
+                'min_turnover': float,
+                'max_turnover': float,
+                'min_mcap_b': float,
+                'max_mcap_b': float,
+                'exclude_loss_making': lambda x: x.lower() == 'true',
+                'exclude_startup_board': lambda x: x.lower() == 'true',
+                'max_candidates_rough': int,
+                'min_score': int,
+                'max_final_candidates': int
+            }
+            
+            for key, val_str in db_params.items():
+                if key in type_mapping:
+                    try:
+                        rules[key] = type_mapping[key](str(val_str))
+                    except ValueError:
+                        print(f"⚠️ Failed to parse param {key}={val_str}, keeping default.")
+                        
+    except Exception as e:
+        print(f"⚠️ Error loading DB rules: {e}")
+        
+    return rules
+
+def check_market_risk() -> bool:
+    """
+    Check Market Environment (Shanghai Composite Index - 000001)
+    Rule: If Index < MA20 AND Drop > 1%, Stop immediately.
+    Returns: True if Market is Risky (Stop), False if Safe (Proceed).
+    """
+    period = 30
+    start_date = calculate_start_date(lookback_days=period + 10)
+    try:
+        # Fetch Shanghai Composite (000001)
+        # using is_index=True. Symbol '000001' for SH Index in akshare
+        df = fetch_stock_data("000001", start_date, is_index=True)
+        
+        if df is None or len(df) < 20:
+             print("⚠️ Insufficient market index data, skipping risk check.")
+             return False
+             
+        # Calculate MA20
+        df['ma20'] = df['close'].rolling(window=20).mean()
+        
+        # Calculate Change Pct
+        df['change_pct'] = df['close'].pct_change() * 100
+        
+        # Check Last Row
+        last = df.iloc[-1]
+        
+        # Log market status
+        market_status = f"Market(000001): {last['close']:.2f}, MA20: {last['ma20']:.2f}, Chg: {last['change_pct']:.2f}%"
+        print(f"🌍 {market_status}")
+        
+        # Risk Condition: Price < MA20 AND Change < -1.0% (Significant Drop/Breakdown)
+        # Note: We use 'close' vs 'ma20'.
+        if last['close'] < last['ma20'] and last['change_pct'] < -1.0:
+            print("🛑 RISK ALERT: Market below MA20 and dropping > 1%. Strategy Halted.")
+            return True
+        
+        return False
+        
+    except Exception as e:
+        print(f"⚠️ Market check error: {e}")
+        return False
+
+def get_rising_sectors() -> List[str]:
+    """
+    Get list of sectors with positive change today
+    """
+    print("🌍 Fetching sector data...")
+    df = fetch_sector_data()
+    if df is None or df.empty:
+        return []
+    
+    # Filter sectors with change_pct > 0
+    rising = df[df['涨跌幅'] > 0]
+    return rising['板块名称'].tolist()
 
 def get_market_snapshot() -> pd.DataFrame:
     """
@@ -21,6 +121,7 @@ def get_market_snapshot() -> pd.DataFrame:
         
         # Renaissance mapping for easier handling
         # Columns usually: 序号, 代码, 名称, 最新价, 涨跌幅, 涨跌额, 成交量, 成交额, 振幅, 最高, 最低, 今开, 昨收, 量比, 换手率, 市盈率-动态, 市净率
+        # 注意：akshare返回的列名可能包含"板块"
         column_map = {
             '代码': 'symbol',
             '名称': 'name',
@@ -31,8 +132,15 @@ def get_market_snapshot() -> pd.DataFrame:
             '量比': 'volume_ratio',
             '换手率': 'turnover_rate',
             '市盈率-动态': 'pe_ttm',
-            '流通市值': 'mcap_float'
+            '流通市值': 'mcap_float',
+            '所属板块': 'sector'  # AkShare spot data often includes this, but if not we proceed
         }
+        # Handle potential column name variations if "所属板块" isn't present by default, we can't strict map it
+        # But stock_zh_a_spot_em usually doesn't have '所属板块' directly.
+        # Sector filtering in Rough Screen might need a separate mapping or rely on 'bk' mapping if available.
+        # Since getting specific sector for each stock is expensive, we will implement optimized "Sector Beta" logic:
+        # We will NOT filter by sector column here if it doesn't exist.
+        
         df = df.rename(columns=column_map)
         
         # Ensure numeric types
@@ -52,11 +160,17 @@ def run_rough_screen(df: pd.DataFrame, criteria: Dict[str, Any]) -> List[Dict[st
     """
     print(f"\n🔍 Running Rough Screen on {len(df)} stocks...")
     
+    # 0. Feature: Sector Beta Analysis (Optional but recommended)
+    # Since checking every stock's sector is slow, we'll skip strict sector matching in Snapshot
+    # Instead, we rely on the fact that strong stocks usually belong to strong sectors.
+    # We will fetch sector data just to display market sentiment, or if we had sector mapping.
+    # For now, we proceed with strict technical rough screen.
+    
     # 1. Price Range
     # Masking for efficiency
     mask = (df['price'] > 0)
     
-    # 2. Change Pct (e.g., 2% to 9%)
+    # 2. Change Pct (e.g., 2% to 8% - Avoid Limit Up)
     if 'min_change' in criteria:
         mask &= (df['change_pct'] >= criteria['min_change'])
     if 'max_change' in criteria:
@@ -86,16 +200,35 @@ def run_rough_screen(df: pd.DataFrame, criteria: Dict[str, Any]) -> List[Dict[st
     mask &= (~df['name'].str.contains('ST'))
     mask &= (~df['name'].str.contains('退'))
     
-    # Exclude Beijing Stock Exchange (symbols starting with 8 or 4) if desired
-    # Usually standard strategy focuses on 60x and 00x
-    mask &= (df['symbol'].astype(str).str.match(r'^(00|60|30)'))
+    # Exclude Beijing Stock Exchange (symbols starting with 8 or 4)
+    # Filter Startup Board (30) if configured
+    allowed_prefixes = ['00', '60']
+    if not criteria.get('exclude_startup_board', False):
+        allowed_prefixes.append('30')
+        
+    pattern = r'^(' + '|'.join(allowed_prefixes) + ')'
+    mask &= (df['symbol'].astype(str).str.match(pattern))
 
     result_df = df[mask]
     
-    # Sort by stronger metrics (e.g., volume ratio or change pct)
-    result_df = result_df.sort_values(by='change_pct', ascending=False)
+    # Sort by "Active Money" (Volume Ratio or Turnover), NOT just Price Change
+    # This fixes "Crucial Fix #1: Avoid chasing fish tails"
+    # Prioritize stocks with high relative volume (主力资金进场)
+    if 'volume_ratio' in result_df.columns:
+        result_df = result_df.sort_values(by='volume_ratio', ascending=False)
+    else:
+        result_df = result_df.sort_values(by='change_pct', ascending=False)
     
-    candidates = result_df.head(criteria.get('max_candidates_rough', 50)).to_dict('records')
+    candidate_limit = criteria.get('max_candidates_rough', 100)
+    print(f"   Filtering top {candidate_limit} by Volume Ratio...")
+    
+    candidates = result_df.head(candidate_limit).to_dict('records')
+    
+    # Note on Sector Beta:
+    # Accurate sector filtering requires mapping each stock to its sector, which isn't in the snapshot.
+    # We will enforce sector beta logic in the Deep Screen or by fetching detailed info.
+    # For now, the "Volume Ratio" sort + "2-8% Change" is a very strong filter itself.
+    
     print(f"✅ Rough Screen passed: {len(candidates)} stocks")
     return candidates
 
@@ -125,16 +258,24 @@ def analyze_candidate(candidate: Dict[str, Any], config: Dict[str, Any]) -> Dict
     tech_data['symbol'] = symbol
     tech_data['name'] = candidate['name']
     
+    # Fetch News (Optimization: AI Prompting)
+    # We'll attach news to the tech_data so LLM can read it
+    tech_data['latest_news'] = fetch_stock_news(symbol)
+
     return tech_data
 
-def run_deep_screen(candidates: List[Dict[str, Any]], config: Dict[str, Any]) -> List[Dict[str, Any]]:
+def run_deep_screen(candidates: List[Dict[str, Any]], config: Dict[str, Any], rules: Dict[str, Any] = None) -> List[Dict[str, Any]]:
     """
     Apply Step 2: Deep Technical Screening (Multi-threaded)
     """
     print(f"\n🔬 Running Deep Technical Analysis on {len(candidates)} candidates...")
     
     final_candidates = []
-    min_score = config['selection_rules'].get('min_score', 70)
+    # Use provided rules or fallback to config
+    if rules is None:
+        rules = config.get('selection_rules', {})
+        
+    min_score = rules.get('min_score', 70)
     
     with ThreadPoolExecutor(max_workers=5) as executor:
         future_to_stock = {executor.submit(analyze_candidate, c, config): c for c in candidates}
@@ -174,26 +315,34 @@ def run_stock_selection(config: Dict[str, Any]):
     print("🕵️‍♂️ AUTO-PICKER: Starting Market Scan")
     print("="*60)
     
-    # 0. Get Criteria
-    rules = config.get('selection_rules', {})
+    # 0. Get Criteria (Merge DB and Config)
+    rules = get_selection_rules(config)
+    
     if not rules.get('enabled', False):
-        print("Stock selection is disabled in config.")
+        print("Stock selection is disabled in config/DB.")
         return []
         
-    # 1. Fetch Snapshot
+    print(f"📋 Selection Criteria: Min Score > {rules.get('min_score')}, Max candidates: {rules.get('max_final_candidates')}")
+
+    # 1. Market Environment Check (Risk Control)
+    if check_market_risk():
+        print("🛑 Force Stop triggered by Market Environment.")
+        return []
+
+    # 2. Fetch Snapshot
     snapshot_df = get_market_snapshot()
     if snapshot_df.empty:
         print("❌ Failed to get market data.")
         return []
         
-    # 2. Rough Screen
+    # 3. Rough Screen
     rough_candidates = run_rough_screen(snapshot_df, rules)
     if not rough_candidates:
         print("❌ No stocks matched rough criteria.")
         return []
         
-    # 3. Deep Screen
-    final_candidates = run_deep_screen(rough_candidates, config)
+    # 4. Deep Screen
+    final_candidates = run_deep_screen(rough_candidates, config, rules)
     
     print(f"\n🎉 Selection Complete! Found {len(final_candidates)} high-quality targets.")
     return final_candidates

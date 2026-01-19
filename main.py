@@ -16,6 +16,8 @@ from llm_analyst import generate_analysis, format_stock_section
 from report_generator import generate_html_report
 from stock_screener import run_stock_selection
 from etf_score import apply_etf_score, format_etf_score_section
+import portfolio_manager
+import database
 
 
 def load_config(config_path: str = "config.json") -> Dict[str, Any]:
@@ -35,79 +37,10 @@ def analyze_stock(
     config: Dict[str, Any]
 ) -> str:
     """
-    Analyze a single stock and return formatted markdown section
-    
-    Args:
-        stock_info: Stock metadata from portfolio
-        config: Full configuration dict
-    
-    Returns:
-        Markdown-formatted analysis section
+    Wrapper for analyze_stock_with_data to maintain backward compatibility
     """
-    symbol = stock_info['symbol']
-    name = stock_info['name']
-    
-    print(f"\n{'='*60}")
-    print(f"📊 Analyzing: {symbol} - {name}")
-    print(f"{'='*60}")
-    
-    # Step 1: Fetch historical data
-    is_index = symbol.startswith('0003') or symbol.startswith('3999')
-    start_date = calculate_start_date(config['analysis']['lookback_days'])
-    
-    df = fetch_stock_data(symbol, start_date, is_index=is_index)
-    if df is None or df.empty:
-        return f"\n## {symbol} - {name}\n\n**❌ 数据获取失败，跳过分析。**\n\n---\n"
-    
-    # Step 2: Calculate technical indicators
-    df = calculate_indicators(
-        df,
-        ma_short=config['analysis']['ma_short'],
-        ma_long=config['analysis']['ma_long']
-    )
-    
-    # Step 3: Extract latest metrics
-    tech_data = get_latest_metrics(df, cost_price=stock_info.get('cost_price'))
-    if not tech_data:
-        return f"\n## {symbol} - {name}\n\n**❌ 指标计算失败，跳过分析。**\n\n---\n"
-    
-    # Step 3.5: Apply ETF-specific scoring if asset_type is 'etf'
-    asset_type = stock_info.get('asset_type', stock_info.get('type', 'stock'))
-    if asset_type == 'etf':
-        tech_data = apply_etf_score(tech_data)
-        print(f"📈 Latest Price: ¥{tech_data['close']} | ETF Score: {tech_data['composite_score']} ({tech_data['rating']})")
-    else:
-        print(f"📈 Latest Price: ¥{tech_data['close']} | Trend: {tech_data['trend_signal']}")
-    
-    # Step 4: Determine which API to use based on api.provider
-    # 根据 api.provider 选择对应的配置（api_gemini 或 api_deepseek）
-    provider = config['api'].get('provider', 'openai')
-    api_config_key = f"api_{provider}"
-    
-    if api_config_key in config:
-        api_config = config[api_config_key]
-        print(f"🤖 Using LLM provider: {provider} (from {api_config_key})")
-    else:
-        # 如果找不到对应的配置，使用默认的 api 配置
-        api_config = config['api']
-        print(f"🤖 Using LLM provider: {provider} (from api)")
-    
-    # Step 5: Generate LLM analysis
-    asset_type = stock_info.get('asset_type', stock_info.get('type', 'stock'))
-    print(f"🤖 Generating AI analysis... (Type: {asset_type})")
-    
-    llm_analysis = generate_analysis(
-        stock_info=stock_info,
-        tech_data=tech_data,
-        api_config=api_config,
-        analysis_type="holding"
-    )
-    
-    # Step 6: Format the complete section
-    section = format_stock_section(stock_info, tech_data, llm_analysis)
-    
-    print(f"✅ Analysis complete for {symbol}")
-    return section
+    res = analyze_stock_with_data(stock_info, config)
+    return res['markdown']
 
 
 def generate_report_header() -> str:
@@ -185,27 +118,190 @@ def process_portfolio(config: Dict[str, Any], date_str: str) -> str:
     """
     Process portfolio analysis (to be run in parallel)
     """
-    portfolio = config['portfolio']
+    # Replace config['portfolio'] with DB call
+    portfolio = portfolio_manager.get_portfolio()
     print(f"\n📊 Portfolio contains {len(portfolio)} positions")
     
     content = f"\n# 📊 持仓分析日报 ({date_str})\n\n"
+    
+    # --- 1. Generate Summary Table ---
+    content += "## 📈 持仓概览\n\n"
+    content += "| 代码 | 名称 | 当前价 | 趋势状态 | 综合评分 | 建议操作 |\n"
+    content += "|---|---|---|---|---|---|\n"
+    
+    full_sections = ""
     
     for i, stock_info in enumerate(portfolio, 1):
         print(f"\n[{i}/{len(portfolio)}] Processing {stock_info['symbol']}...")
         
         try:
             # Analyze stock and append to report
-            section = analyze_stock(stock_info, config)
-            content += section
+            # We need to capture the results first to build the summary table
+            # analyze_stock returns the markdown string. We need to refactor slightly or extract data here?
+            # To avoid refactoring analyze_stock too much, let's keep it simple:
+            # We will use analyze_stock as is, but we might want to capture metadata better in the future.
+            # For now, since analyze_stock prints to stdout and returns a string, we can't easily get the dict back
+            # without parsing or refactoring.
+            # Let's do a quick refactor of analyze_stock or just fetch data again?
+            # Fetching again is wasteful.
+            
+            # Let's modify the loop to do the work here or split analyze_stock.
+            # Ideally, analyze_stock should return (metadata_dict, markdown_section).
+            
+            # Since I cannot easily change the signature of analyze_stock widely (used elsewhere?),
+            # I will assume I can create a helper or just move logic here.
+            # But analyze_stock is used below. Let's create a temporary improved version or use regex to extract from markdown?
+            # Regex is fragile.
+            # Let's inspect analyze_stock. It's defined above. I will modify analyze_stock to return a tuple.
+            
+            res = analyze_stock_with_data(stock_info, config)
+            section = res['markdown']
+            data = res['data']
+            
+            full_sections += section
+            
+            # Add row to summary table
+            # Status: Trend Signal or Rating
+            status = data.get('trend_signal', '未知')
+            score = data.get('composite_score', 'N/A')
+            rating = data.get('rating', '')
+            op_sugg = data.get('operation_suggestion', '--')
+            
+            content += f"| {stock_info['symbol']} | [{stock_info['name']}](#{stock_info['symbol']}-{stock_info['name']}) | ¥{data['close']} | {status} | {score} ({rating}) | {op_sugg} |\n"
             
         except Exception as e:
             # Continue to next stock even if one fails
             print(f"❌ Error analyzing {stock_info['symbol']}: {e}")
-            content += f"\n## {stock_info['symbol']} - {stock_info['name']}\n\n"
-            content += f"**❌ 分析失败：** {str(e)}\n\n---\n"
+            content += f"| {stock_info['symbol']} | {stock_info['name']} | Error | -- | -- | -- |\n"
+            full_sections += f"\n## {stock_info['symbol']} - {stock_info['name']}\n\n"
+            full_sections += f"**❌ 分析失败：** {str(e)}\n\n---\n"
             continue
             
+    content += "\n---\n\n" + full_sections
     return content
+
+def analyze_stock_with_data(stock_info: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Modified version of analyze_stock that returns both data and markdown
+    """
+    symbol = stock_info['symbol']
+    name = stock_info['name']
+
+    print(f"\n{'='*60}")
+    print(f"📊 Analyzing: {symbol} - {name}")
+    print(f"{'='*60}")
+
+    # Step 1: Fetch historical data
+    is_index = symbol.startswith('0003') or symbol.startswith('3999')
+    start_date = calculate_start_date(config['analysis']['lookback_days'])
+
+    # Determine asset_type from config
+    asset_type = stock_info.get('asset_type', stock_info.get('type', 'stock'))
+
+    # Use dispatcher instead of direct fetch_stock_data
+    from data_fetcher import fetch_data_dispatcher
+    df = fetch_data_dispatcher(symbol, asset_type, start_date)
+
+    if df is None or df.empty:
+        return {
+            'markdown': f"\n## {symbol} - {name}\n\n**❌ 数据获取失败，跳过分析。**\n\n---\n",
+            'data': {'close': 0, 'trend_signal': 'Error'}
+        }
+
+    # Step 2: Calculate technical indicators
+    df = calculate_indicators(
+        df,
+        ma_short=config['analysis']['ma_short'],
+        ma_long=config['analysis']['ma_long']
+    )
+
+    # Step 3: Extract latest metrics (基于昨日收盘价的技术指标)
+    tech_data = get_latest_metrics(df, cost_price=stock_info.get('cost_price'))
+    if not tech_data:
+        return {
+            'markdown': f"\n## {symbol} - {name}\n\n**❌ 指标计算失败，跳过分析。**\n\n---\n",
+            'data': {'close': 0, 'trend_signal': 'Error'}
+        }
+
+    # Step 3.5: Get realtime price (获取实时价格) - 与web_server.py保持一致
+    from monitor_engine import get_realtime_data
+
+    realtime_dict = get_realtime_data([stock_info])
+    realtime_data = realtime_dict.get(symbol)
+
+    # Step 3.6: Update tech_data with realtime price if available
+    if realtime_data and realtime_data.get('price'):
+        print(f"📊 {symbol} - 历史收盘价: {tech_data.get('close')}, 实时价格: {realtime_data.get('price')}")
+        # Override close price with realtime price
+        tech_data['close'] = round(realtime_data.get('price'), 3)
+        tech_data['realtime_price'] = round(realtime_data.get('price'), 3)
+        tech_data['change_pct_today'] = round(realtime_data.get('change_pct', 0), 2)
+        # Update date to today since we have realtime data
+        tech_data['date'] = datetime.now().strftime('%Y-%m-%d')
+
+        # Recalculate profit/loss with realtime price
+        if stock_info.get('cost_price'):
+            cost_price = stock_info['cost_price']
+            profit_loss_pct = ((tech_data['close'] - cost_price) / cost_price) * 100
+            tech_data['profit_loss_pct'] = round(profit_loss_pct, 2)
+    else:
+        print(f"⚠️ {symbol} - 无法获取实时价格，使用历史收盘价: {tech_data.get('close')}")
+
+    # Step 3.7: Apply ETF-specific scoring if asset_type is 'etf'
+    if asset_type == 'etf':
+        tech_data = apply_etf_score(tech_data)
+        print(f"📈 当前价格: ¥{tech_data['close']} | ETF Score: {tech_data['composite_score']} ({tech_data['rating']})")
+    else:
+        print(f"📈 当前价格: ¥{tech_data['close']} | Trend: {tech_data['trend_signal']}")
+    
+    # Step 4: Determine which API to use
+    provider = config['api'].get('provider', 'openai')
+    api_config_key = f"api_{provider}"
+
+    if api_config_key in config:
+        api_config = config[api_config_key]
+        print(f"🤖 Using LLM provider: {provider} (from {api_config_key})")
+    else:
+        api_config = config['api']
+        print(f"🤖 Using LLM provider: {provider} (from api)")
+
+    # Step 5: Generate LLM analysis (使用包含实时价格的tech_data)
+    print(f"🤖 Generating AI analysis... (Type: {asset_type})")
+
+    llm_analysis = generate_analysis(
+        stock_info=stock_info,
+        tech_data=tech_data,  # 现在包含实时价格
+        api_config=api_config,
+        analysis_type="holding"
+    )
+
+    # Step 6: Format the complete section (Ensure full report is saved to DB)
+    # 先生成完整的 Markdown 报告（含指标头部）
+    formatted_report = format_stock_section(stock_info, tech_data, llm_analysis)
+
+    # Step 7: Save analysis to database (保存完整的 Markdown 报告)
+    try:
+        analysis_data = {
+            'price': tech_data['close'],  # 现在是实时价格
+            'ma20': tech_data['ma20'],
+            'trend_signal': tech_data.get('trend_signal', '未知'),
+            'composite_score': tech_data.get('composite_score', 0),
+            'ai_analysis': formatted_report  # 🔥 关键修改：存入完整的格式化报告
+        }
+        database.save_holding_analysis(symbol, datetime.now().strftime('%Y-%m-%d'), analysis_data)
+    except Exception as e:
+        print(f"❌ Error saving analysis to DB for {symbol}: {e}")
+
+    # Step 8: Return result for file output
+    section = f'<div id="{symbol}-{name}"></div>\n\n' # Anchor
+    section += formatted_report
+    
+    print(f"✅ Analysis complete for {symbol}")
+    
+    return {
+        'markdown': section,
+        'data': tech_data
+    }
 
 
 def process_candidates(config: Dict[str, Any], api_config: Dict[str, Any], date_str: str) -> str:
@@ -221,6 +317,13 @@ def process_candidates(config: Dict[str, Any], api_config: Dict[str, Any], date_
         
         if selected_stocks:
             content += "> *注意：以下标的由算法基于技术指标筛选，非投资建议。请严格遵守交易纪律。*\n\n"
+            
+            # --- 1. Table Header ---
+            table_content = "## 📋 选股概览\n\n"
+            table_content += "| 代码 | 名称 | 当前价 | 量比 | 评分 | 核心看点 |\n"
+            table_content += "|---|---|---|---|---|---|\n"
+            
+            details_content = ""
             
             for i, tech_data in enumerate(selected_stocks, 1):
                 stock_info = {
@@ -241,17 +344,35 @@ def process_candidates(config: Dict[str, Any], api_config: Dict[str, Any], date_
                 except Exception as e:
                     llm_analysis = f"AI分析失败 ({str(e)})"
                 
-                # Format (Simplified version for picks)
-                content += f"### {i}. {stock_info['symbol']} - {stock_info['name']}\n\n"
-                content += f"**📊 综合评分：{tech_data['composite_score']}分 ({tech_data['rating']})**\n\n"
+                # Format Detail Section (Prepare full report first)
+                formatted_report = format_stock_section(stock_info, tech_data, llm_analysis)
+
+                # Save to database (Save FULL report including metrics)
+                try:
+                    selection_data = {
+                        'symbol': stock_info['symbol'],
+                        'name': stock_info['name'],
+                        'close_price': tech_data['close'],
+                        'volume_ratio': tech_data['volume_ratio'],
+                        'composite_score': tech_data.get('composite_score', 0),
+                        'ai_analysis': formatted_report # 🔥 关键修改：存入完整的格式化报告
+                    }
+                    database.save_daily_selection(date_str, selection_data)
+                except Exception as e:
+                    print(f"❌ Error saving selection to DB for {stock_info['symbol']}: {e}")
+
+                # Add to Table
+                # Short Summary
+                summary = tech_data.get('rating', '观察')
                 
-                content += f"**入选理由：**\n"
-                content += f"- **强势趋势**：价格 ¥{tech_data['close']} > MA20\n"
-                content += f"- **量能活跃**：量比 {tech_data['volume_ratio']}，{tech_data['volume_pattern']}\n"
-                content += f"- **动量充沛**：MACD {tech_data['macd_signal']}，RSI {tech_data['rsi']}\n"
+                table_content += f"| {stock_info['symbol']} | [{stock_info['name']}](#{stock_info['symbol']}-{stock_info['name']}) | ¥{tech_data['close']} | {tech_data['volume_ratio']} | {tech_data['composite_score']} | {summary} |\n"
                 
-                content += f"\n**🤖 AI点评：**\n{llm_analysis}\n\n"
-                content += "---\n"
+                # Format Detail Section
+                details_content += f'<div id="{stock_info["symbol"]}-{stock_info["name"]}"></div>\n\n'
+                details_content += formatted_report
+            
+            content += table_content + "\n---\n\n" + details_content
+            
         else:
             content += "**今日无符合严格筛选标准的标的。**\n\n*(建议休息观望，好猎手擅长等待)*\n\n---\n"
             

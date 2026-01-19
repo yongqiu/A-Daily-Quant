@@ -7,6 +7,13 @@ import numpy as np
 from typing import Dict, Any, Tuple
 
 
+def safe_round(value: float, decimals: int = 2) -> Any:
+    """Safe round that returns None if value is NaN or Infinite"""
+    if pd.isna(value) or np.isinf(value):
+        return None
+    return round(value, decimals)
+
+
 def calculate_ma(df: pd.DataFrame, periods: list = [5, 10, 20, 60]) -> pd.DataFrame:
     """计算多周期均线"""
     for period in periods:
@@ -204,7 +211,35 @@ def calculate_indicators(df: pd.DataFrame, ma_short: int = 20, ma_long: int = 60
     df['distance_from_ma20'] = ((df['close'] - df[f'ma{ma_short}']) / df[f'ma{ma_short}']) * 100
     df['price_change_pct'] = df['close'].pct_change() * 100
     
+    # Feature: Distance to 120-Day High (Chip Structure Proxy)
+    # The closer to 1 (0% drop), the less trapped supply above.
+    # We use (Close / 120-Day High)
+    df['high_120'] = df['high'].rolling(window=120).max()
+    df['price_vs_high120'] = df['close'] / df['high_120']
+    
     return df
+
+
+def get_stock_operation_suggestion(total_score: int, metrics: Dict[str, Any]) -> str:
+    """
+    根据个股评分给出操作建议
+    """
+    close = metrics.get('close', 0)
+    ma20 = metrics.get('ma20', 0)
+    
+    if total_score >= 80:
+        return "【坚决持有】趋势强烈，可持有或逢低加仓"
+    elif total_score >= 65:
+        return "【持有】多头趋势中，继续持有"
+    elif total_score >= 50:
+        if close > ma20:
+             return "【持有/观望】震荡偏多，关注支撑位"
+        else:
+             return "【观望】震荡偏弱，暂不介入"
+    elif total_score >= 35:
+        return "【减仓】趋势走弱，建议降低仓位"
+    else:
+        return "【清仓/回避】空头趋势，建议离场"
 
 
 def calculate_composite_score(metrics: Dict[str, Any]) -> Tuple[int, str, list]:
@@ -224,69 +259,88 @@ def calculate_composite_score(metrics: Dict[str, Any]) -> Tuple[int, str, list]:
     scores = []
     details = []
     
-    # === 趋势得分 (30分) ===
+    # === 趋势得分 (35分) ===
     trend_score = 0
     
-    # 价格与MA20关系 (15分)
+    # 价格与MA20关系 (10分)
     if metrics['close'] > metrics['ma20']:
-        trend_score += 15
-        details.append("✅ 价格在MA20上方 (+15)")
+        trend_score += 10
+        details.append("✅ 价格在MA20上方 (+10)")
     else:
         details.append("❌ 价格在MA20下方 (+0)")
     
-    # 均线排列 (15分)
+    # 均线排列 (10分)
     if metrics.get('ma_arrangement') == '多头排列':
-        trend_score += 15
-        details.append("✅ 均线多头排列 (+15)")
+        trend_score += 10
+        details.append("✅ 均线多头排列 (+10)")
     elif metrics.get('ma_arrangement') == '空头排列':
         details.append("❌ 均线空头排列 (+0)")
     else:
-        trend_score += 7
-        details.append("⚠️ 均线交织 (+7)")
-    
-    scores.append(('趋势', trend_score, 30))
-    
-    # === 动量得分 (25分) ===
-    momentum_score = 0
-    
-    # MACD (15分)
+        trend_score += 5
+        details.append("⚠️ 均线交织 (+5)")
+
+    # MACD (15分 - Moved here)
     if metrics['macd_dif'] > metrics['macd_dea']:
-        momentum_score += 10
+        trend_score += 10
         details.append("✅ MACD金叉 (+10)")
     else:
         details.append("❌ MACD死叉 (+0)")
     
     if metrics['macd_hist'] > 0:
-        momentum_score += 5
+        trend_score += 5
         details.append("✅ MACD柱为正 (+5)")
     else:
         details.append("❌ MACD柱为负 (+0)")
     
-    # RSI趋势 (10分)
-    rsi = metrics['rsi']
-    if 40 <= rsi <= 60:
-        momentum_score += 10
-        details.append(f"✅ RSI中性区间({rsi:.1f}) (+10)")
-    elif 30 <= rsi < 40 or 60 < rsi <= 70:
-        momentum_score += 5
-        details.append(f"⚠️ RSI偏离中性({rsi:.1f}) (+5)")
-    else:
-        details.append(f"❌ RSI极端区间({rsi:.1f}) (+0)")
+    scores.append(('趋势', trend_score, 35))
     
+    # === 动量得分 (25分) ===
+    momentum_score = 0
+    
+    # MACD (15分 moved to Trend Score to balance)
+    pass
+    
+    # RSI趋势 (15分) - Adjusted for Trend Strategy
+    # 60-75 is the "Sweet Spot" for strong momentum
+    rsi = metrics['rsi']
+    if 60 <= rsi <= 75:
+        momentum_score += 15
+        details.append(f"🔥 RSI主升浪区间({rsi:.1f}) (+15)")
+    elif 50 <= rsi < 60:
+        momentum_score += 10
+        details.append(f"✅ RSI多头区间({rsi:.1f}) (+10)")
+    elif 40 <= rsi < 50:
+        momentum_score += 5
+        details.append(f"⚠️ RSI中性偏弱({rsi:.1f}) (+5)")
+    elif rsi > 80:
+        momentum_score += 0
+        details.append(f"❌ RSI严重超买({rsi:.1f}) (+0)")
+    else:
+        details.append(f"❌ RSI弱势({rsi:.1f}) (+0)")
+    
+    # Feature: Price Structure (10分)
+    # Distance to 120-Day High
+    price_pos = metrics.get('price_vs_high120', 0)
+    if price_pos >= 0.95:
+        momentum_score += 10
+        details.append(f"🔥 逼近前高({price_pos:.2%}) (+10)")
+    elif price_pos >= 0.85:
+        momentum_score += 5
+        details.append(f"✅ 接近高点({price_pos:.2%}) (+5)")
+    else:
+        details.append(f"⚠️ 距前高较远({price_pos:.2%}) (+0)")
+
     scores.append(('动量', momentum_score, 25))
     
     # === 超买超卖得分 (20分) ===
     overbought_score = 0
     
-    # RSI超买超卖 (8分)
-    if 30 <= rsi <= 70:
+    # RSI Extreme check (Keep basic safety)
+    if rsi < 80:
         overbought_score += 8
-        details.append("✅ RSI未超买超卖 (+8)")
-    elif rsi > 70:
-        details.append("⚠️ RSI超买警告 (+0)")
+        details.append("✅ RSI安全范围 (+8)")
     else:
-        overbought_score += 4  # 超卖可能是机会
-        details.append("⚠️ RSI超卖 (+4)")
+        details.append("⚠️ RSI超买警告 (+0)")
     
     # KDJ (6分)
     kdj_k = metrics['kdj_k']
@@ -333,16 +387,26 @@ def calculate_composite_score(metrics: Dict[str, Any]) -> Tuple[int, str, list]:
     # === 风险得分 (10分) ===
     risk_score = 0
     
+    # ATR Volatility Check (New Feature)
+    atr_pct = metrics.get('atr_pct', 0)
+    if 2.0 <= atr_pct <= 8.0:
+        risk_score += 5
+        details.append(f"✅ 波动率适中({atr_pct:.1f}%) (+5)")
+    elif atr_pct < 2.0:
+        details.append(f"⚠️ 波动率过低({atr_pct:.1f}%) (+0)")
+    else:
+        details.append(f"⚠️ 波动率过高({atr_pct:.1f}%) (+0)")
+        
     # 距离MA20的风险
     distance = abs(metrics['distance_from_ma20'])
     if distance <= 5:
-        risk_score += 5
-        details.append("✅ 距MA20较近（风险可控）(+5)")
-    elif distance <= 10:
         risk_score += 3
-        details.append("⚠️ 距MA20适中 (+3)")
+        details.append("✅ 距MA20较近(+3)")
+    elif distance <= 10:
+        risk_score += 1
+        details.append("⚠️ 距MA20适中(+1)")
     else:
-        details.append("❌ 距MA20过远（追高/杀跌风险）(+0)")
+        details.append("❌ 距MA20远(+0)")
     
     # 距离支撑/压力位
     dist_support = metrics.get('distance_to_support', 5)
@@ -434,65 +498,69 @@ def get_latest_metrics(df: pd.DataFrame, cost_price: float = None) -> Dict[str, 
     
     metrics = {
         'date': latest['date'].strftime('%Y-%m-%d'),
-        'close': round(latest['close'], 2),
-        'open': round(latest['open'], 2),
-        'high': round(latest['high'], 2),
-        'low': round(latest['low'], 2),
+        'close': safe_round(latest['close'], 2),
+        'open': safe_round(latest['open'], 2),
+        'high': safe_round(latest['high'], 2),
+        'low': safe_round(latest['low'], 2),
         
         # 均线
-        'ma5': round(latest['ma5'], 2),
-        'ma10': round(latest['ma10'], 2),
-        'ma20': round(latest['ma20'], 2),
-        'ma60': round(latest['ma60'], 2),
-        'distance_from_ma20': round(latest['distance_from_ma20'], 2),
+        'ma5': safe_round(latest['ma5'], 2),
+        'ma10': safe_round(latest['ma10'], 2),
+        'ma20': safe_round(latest['ma20'], 2),
+        'ma60': safe_round(latest['ma60'], 2),
+        'distance_from_ma20': safe_round(latest['distance_from_ma20'], 2),
         'ma_arrangement': ma_arrangement,
         
         # MACD
-        'macd_dif': round(latest['macd_dif'], 4),
-        'macd_dea': round(latest['macd_dea'], 4),
-        'macd_hist': round(latest['macd_hist'], 4),
+        'macd_dif': safe_round(latest['macd_dif'], 4),
+        'macd_dea': safe_round(latest['macd_dea'], 4),
+        'macd_hist': safe_round(latest['macd_hist'], 4),
         
         # RSI
-        'rsi': round(rsi, 2),
+        'rsi': safe_round(rsi, 2),
         'rsi_signal': rsi_signal,
         
         # KDJ
-        'kdj_k': round(latest['kdj_k'], 2),
-        'kdj_d': round(latest['kdj_d'], 2),
-        'kdj_j': round(latest['kdj_j'], 2),
+        'kdj_k': safe_round(latest['kdj_k'], 2),
+        'kdj_d': safe_round(latest['kdj_d'], 2),
+        'kdj_j': safe_round(latest['kdj_j'], 2),
         'kdj_signal': kdj_signal,
         'kdj_zone': kdj_zone,
         
         # 布林带
-        'boll_upper': round(latest['boll_upper'], 2),
-        'boll_mid': round(latest['boll_mid'], 2),
-        'boll_lower': round(latest['boll_lower'], 2),
-        'boll_position': round(boll_pos, 2),
-        'boll_width': round(latest['boll_width'], 2),
+        'boll_upper': safe_round(latest['boll_upper'], 2),
+        'boll_mid': safe_round(latest['boll_mid'], 2),
+        'boll_lower': safe_round(latest['boll_lower'], 2),
+        'boll_position': safe_round(boll_pos, 2),
+        'boll_width': safe_round(latest['boll_width'], 2),
         'boll_signal': boll_signal,
         
         # 支撑压力
-        'resistance': round(latest['resistance'], 2),
-        'support': round(latest['support'], 2),
-        'distance_to_resistance': round(latest['distance_to_resistance'], 2),
-        'distance_to_support': round(latest['distance_to_support'], 2),
+        'resistance': safe_round(latest['resistance'], 2),
+        'support': safe_round(latest['support'], 2),
+        'distance_to_resistance': safe_round(latest['distance_to_resistance'], 2),
+        'distance_to_support': safe_round(latest['distance_to_support'], 2),
         
         # Pivot Points (明日预测)
-        'pivot_point': round(latest['pivot_point'], 2),
-        'r1': round(latest['r1'], 2),
-        's1': round(latest['s1'], 2),
+        'pivot_point': safe_round(latest['pivot_point'], 2),
+        'r1': safe_round(latest['r1'], 2),
+        's1': safe_round(latest['s1'], 2),
         
         # 风控 (ATR)
-        'atr': round(latest['atr'], 3),
-        'atr_pct': round(latest['atr_pct'], 2),
-        'stop_loss_suggest': round(stop_loss_price, 2),
+        'atr': safe_round(latest['atr'], 3),
+        'atr_pct': safe_round(latest['atr_pct'], 2),
+        'stop_loss_suggest': safe_round(stop_loss_price, 2),
+
+        # Price Structure
+        'high_120': safe_round(latest['high_120'], 2),
+        'price_vs_high120': safe_round(latest['price_vs_high120'], 4),
         
         # 成交量
         'volume': int(latest['volume']),
-        'volume_ma': round(latest['volume_ma'], 2),
-        'volume_ratio': round(latest['volume_ratio'], 2),
-        'volume_change_pct': round(latest['volume_change_pct'], 2),
-        'price_change_pct': round(latest['price_change_pct'], 2),
+        'volume_ma': safe_round(latest['volume_ma'], 2),
+        'volume_ratio': safe_round(latest['volume_ratio'], 2),
+        'volume_change_pct': safe_round(latest['volume_change_pct'], 2),
+        'price_change_pct': safe_round(latest['price_change_pct'], 2),
         
         # 信号汇总
         'trend_signal': trend_signal,
@@ -506,7 +574,7 @@ def get_latest_metrics(df: pd.DataFrame, cost_price: float = None) -> Dict[str, 
     if cost_price:
         profit_loss_pct = ((latest['close'] - cost_price) / cost_price) * 100
         metrics['cost_price'] = cost_price
-        metrics['profit_loss_pct'] = round(profit_loss_pct, 2)
+        metrics['profit_loss_pct'] = safe_round(profit_loss_pct, 2)
     
     # 计算综合评分
     total_score, rating, scores, details = calculate_composite_score(metrics)
@@ -514,5 +582,8 @@ def get_latest_metrics(df: pd.DataFrame, cost_price: float = None) -> Dict[str, 
     metrics['rating'] = rating
     metrics['score_breakdown'] = scores
     metrics['score_details'] = details
+    
+    # 添加个股操作建议
+    metrics['operation_suggestion'] = get_stock_operation_suggestion(total_score, metrics)
     
     return metrics

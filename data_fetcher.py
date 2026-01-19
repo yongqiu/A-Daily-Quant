@@ -4,8 +4,41 @@ Data Fetching Module - Handles AkShare interactions for A-Share market data
 import akshare as ak
 import pandas as pd
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Dict, Any
 import requests
+from functools import lru_cache
+import time
+
+# Stock info cache: {symbol: (data, timestamp)}
+_stock_info_cache: Dict[str, tuple] = {}
+_CACHE_TTL_SECONDS = 300  # 5 minutes cache
+_last_cache_cleanup_time = time.time()
+_CACHE_CLEANUP_INTERVAL = 600  # Clean cache every 10 minutes
+
+
+def _cleanup_expired_cache():
+    """Clean expired cache entries to avoid memory leak"""
+    global _last_cache_cleanup_time
+
+    current_time = time.time()
+
+    # Only cleanup if enough time has passed
+    if current_time - _last_cache_cleanup_time < _CACHE_CLEANUP_INTERVAL:
+        return
+
+    # Find and remove expired entries
+    expired_symbols = [
+        symbol for symbol, (_, cached_time) in _stock_info_cache.items()
+        if current_time - cached_time >= _CACHE_TTL_SECONDS
+    ]
+
+    for symbol in expired_symbols:
+        del _stock_info_cache[symbol]
+
+    _last_cache_cleanup_time = current_time
+
+    if expired_symbols:
+        print(f"🧹 Cache cleanup: removed {len(expired_symbols)} expired entries, {len(_stock_info_cache)} entries remaining")
 
 
 def fetch_crypto_data(symbol: str, days: int = 120) -> Optional[pd.DataFrame]:
@@ -190,3 +223,183 @@ def calculate_start_date(lookback_days: int = 120) -> str:
     """
     start = datetime.now() - timedelta(days=lookback_days + 30)  # Extra buffer for weekends
     return start.strftime('%Y%m%d')
+
+def fetch_sector_data() -> Optional[pd.DataFrame]:
+    """
+    Fetch Today's Sector (Industry) Performance from EastMoney
+    Returns: DataFrame with ['板块名称', '涨跌幅', '领涨股票']
+    """
+    try:
+        # Industry Boards
+        df_industry = ak.stock_board_industry_name_em()
+        # Concept Boards (Optional, maybe too noisy)
+        # df_concept = ak.stock_board_concept_name_em()
+        
+        if df_industry is None or df_industry.empty:
+            return None
+            
+        print(f"✅ Fetched {len(df_industry)} industry sectors.")
+        return df_industry
+    except Exception as e:
+        print(f"❌ Error fetching sector data: {str(e)}")
+        return None
+
+def fetch_stock_news(symbol: str) -> str:
+    """
+    Fetch latest news for a specific stock (Top 3 items)
+    """
+    try:
+        news_df = ak.stock_news_em(symbol=symbol)
+        if news_df is None or news_df.empty:
+            return "暂无相关新闻"
+            
+        # Get top 3 news titles
+        latest_news = news_df.head(3)
+        news_list = []
+        for _, row in latest_news.iterrows():
+            title = row.get('新闻标题', '')
+            time_str = row.get('发布时间', '')
+            if title:
+                news_list.append(f"- {time_str}: {title}")
+                
+        return "\n".join(news_list)
+    except Exception as e:
+        print(f"⚠️ Error fetching news for {symbol}: {e}")
+        return "新闻获取失败"
+
+
+def fetch_stock_info(symbol: str) -> Optional[Dict[str, Any]]:
+    """
+    Fetch stock basic information by symbol
+    Returns dict with keys: name, price, change_pct, etc.
+
+    Optimized version: Uses individual stock API with caching
+    """
+    # Trigger periodic cache cleanup
+    _cleanup_expired_cache()
+
+    # Check cache first
+    current_time = time.time()
+    if symbol in _stock_info_cache:
+        cached_data, cached_time = _stock_info_cache[symbol]
+        if current_time - cached_time < _CACHE_TTL_SECONDS:
+            print(f"✅ Using cached data for {symbol} (age: {int(current_time - cached_time)}s)")
+            return cached_data
+
+    try:
+        # Method 1: Try to get individual stock/ETF realtime quote (much faster)
+        # Determine if it's an ETF based on code pattern
+        is_etf = symbol.startswith('51') or symbol.startswith('159') or symbol.startswith('50')
+
+        try:
+            # Get latest day's data
+            if is_etf:
+                # Use ETF-specific interface
+                df = ak.fund_etf_hist_em(
+                    symbol=symbol,
+                    period="daily",
+                    start_date=(datetime.now() - timedelta(days=5)).strftime('%Y%m%d'),
+                    end_date=datetime.now().strftime('%Y%m%d')
+                )
+            else:
+                # Use stock interface
+                df = ak.stock_zh_a_hist(
+                    symbol=symbol,
+                    period="daily",
+                    start_date=(datetime.now() - timedelta(days=5)).strftime('%Y%m%d'),
+                    adjust=""
+                )
+
+            if df is not None and not df.empty:
+                latest = df.iloc[-1]
+
+                # Get stock/ETF name from basic info
+                stock_name = symbol  # Default to symbol if name fetch fails
+                try:
+                    if is_etf:
+                        # For ETF, try to get name from the historical data first (faster)
+                        # Some ETF hist data might contain name in metadata
+                        # If not available, user can manually input the name
+                        # We skip the full ETF spot query to avoid slowdown
+                        stock_name = f"ETF-{symbol}"  # Placeholder, user can edit later
+                    else:
+                        # Get stock name from individual info
+                        info_df = ak.stock_individual_info_em(symbol=symbol)
+                        if info_df is not None and not info_df.empty:
+                            name_row = info_df[info_df['item'] == '股票简称']
+                            stock_name = name_row['value'].iloc[0] if not name_row.empty else symbol
+                except Exception as e:
+                    print(f"⚠️ Could not fetch name for {symbol}: {e}")
+
+                # Calculate change_pct from latest data
+                close_price = float(latest.get('收盘', 0))
+                open_price = float(latest.get('开盘', 0))
+
+                # Approximate change_pct (ideally need previous close)
+                if len(df) > 1:
+                    prev_close = float(df.iloc[-2].get('收盘', close_price))
+                    change_pct = ((close_price - prev_close) / prev_close * 100) if prev_close > 0 else 0
+                else:
+                    change_pct = ((close_price - open_price) / open_price * 100) if open_price > 0 else 0
+
+                result = {
+                    'symbol': symbol,
+                    'name': stock_name,
+                    'price': close_price,
+                    'change_pct': round(change_pct, 2),
+                    'volume': int(latest.get('成交量', 0)),
+                    'amount': float(latest.get('成交额', 0))
+                }
+
+                # Cache the result
+                _stock_info_cache[symbol] = (result, current_time)
+                print(f"✅ Fetched and cached {'ETF' if is_etf else 'stock'} info for {symbol}")
+                return result
+            else:
+                # Empty dataframe means stock doesn't exist - don't fallback to full market query
+                print(f"⚠️ {'ETF' if is_etf else 'Stock'} {symbol} not found (empty data returned)")
+                return None
+
+        except Exception as e:
+            # Check if it's a "stock not found" type error
+            error_msg = str(e).lower()
+            if any(keyword in error_msg for keyword in ['不存在', 'not found', 'empty', '无数据', 'no data']):
+                print(f"⚠️ Stock {symbol} does not exist: {e}")
+                return None
+
+            print(f"⚠️ Fast fetch failed for {symbol}, fallback to full market data: {e}")
+
+        # Method 2: Fallback to full market data (slower but more reliable)
+        # Only used when fast method fails due to network/API issues, not when stock doesn't exist
+        print(f"🔄 Using fallback method (full market query) for {symbol}...")
+        df = ak.stock_zh_a_spot_em()
+
+        if df is None or df.empty:
+            print(f"⚠️ No stock data returned")
+            return None
+
+        # Try to find the stock by symbol
+        stock_row = df[df['代码'] == symbol]
+
+        if stock_row.empty:
+            print(f"⚠️ Stock {symbol} not found in real-time data")
+            return None
+
+        stock_info = stock_row.iloc[0]
+
+        result = {
+            'symbol': symbol,
+            'name': stock_info.get('名称', ''),
+            'price': float(stock_info.get('最新价', 0)) if pd.notna(stock_info.get('最新价')) else 0,
+            'change_pct': float(stock_info.get('涨跌幅', 0)) if pd.notna(stock_info.get('涨跌幅')) else 0,
+            'volume': int(stock_info.get('成交量', 0)) if pd.notna(stock_info.get('成交量')) else 0,
+            'amount': float(stock_info.get('成交额', 0)) if pd.notna(stock_info.get('成交额')) else 0
+        }
+
+        # Cache the result
+        _stock_info_cache[symbol] = (result, current_time)
+        return result
+
+    except Exception as e:
+        print(f"❌ Error fetching stock info for {symbol}: {e}")
+        return None

@@ -6,6 +6,7 @@ from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 import uvicorn
 import logging
 import asyncio
@@ -16,9 +17,11 @@ import subprocess
 import re
 import sys
 from collections import deque
+from typing import Optional
 
 from monitor_engine import MonitorEngine
-from data_fetcher import fetch_data_dispatcher, calculate_start_date
+from data_fetcher import fetch_data_dispatcher, calculate_start_date, fetch_stock_info
+import database  # Add database import
 
 app = FastAPI(title="A-Share Strategy Monitor")
 
@@ -100,11 +103,113 @@ async def read_root(request: Request):
         "title": "A-Share Monitor"
     })
 
+@app.get("/strategies", response_class=HTMLResponse)
+async def strategy_config_page(request: Request):
+    """Render the strategy configuration page"""
+    return templates.TemplateResponse("strategies.html", {
+        "request": request,
+        "title": "策略配置中心"
+    })
+
 @app.get("/api/status")
 async def get_status():
     """API called by frontend poller"""
     # Return cached state immediately (non-blocking)
     return market_state
+
+class HoldingBase(BaseModel):
+    symbol: str
+    name: str = ""
+    asset_type: str = "stock"
+    cost_price: float = 0.0
+    position_size: int = 0
+
+class HoldingUpdate(BaseModel):
+    cost_price: Optional[float] = None
+    position_size: Optional[int] = None
+
+@app.get("/api/stock/search/{symbol}")
+async def search_stock(symbol: str):
+    """Search stock information by symbol"""
+    if not symbol or len(symbol) < 3:
+        return {"status": "error", "message": "Invalid symbol"}
+    
+    try:
+        stock_info = fetch_stock_info(symbol)
+        if stock_info:
+            return {
+                "status": "success",
+                "data": stock_info
+            }
+        else:
+            return {
+                "status": "not_found",
+                "message": f"未找到股票 {symbol} 的信息"
+            }
+    except Exception as e:
+        print(f"❌ Error searching stock {symbol}: {e}")
+        return {
+            "status": "error",
+            "message": f"搜索失败: {str(e)}"
+        }
+
+@app.get("/api/holdings")
+async def get_holdings():
+    """Get all holdings from database with latest analysis"""
+    today = datetime.now().strftime('%Y-%m-%d')
+    holdings = database.get_all_holdings(analysis_date=today)
+    # Enrich with latest analysis if needed, or frontend can correlate
+    return holdings
+
+@app.post("/api/holdings")
+async def add_holding(holding: HoldingBase):
+    """Add a new holding"""
+    # If name is empty, try to fetch it? For now let client provide it or default
+    if not holding.name:
+        # Simple fallback or let it be empty
+        holding.name = holding.symbol
+        
+    success = database.add_holding(
+        holding.symbol,
+        holding.name,
+        holding.cost_price,
+        holding.position_size,
+        holding.asset_type
+    )
+    if success:
+        monitor_engine.refresh_targets()
+        return {"status": "success", "message": f"Added {holding.symbol}"}
+    else:
+        raise HTTPException(status_code=400, detail="Failed to add holding (already exists?)")
+
+@app.put("/api/holdings/{symbol}")
+async def update_holding(symbol: str, holding: HoldingUpdate):
+    """Update holding details"""
+    success = database.update_holding(
+        symbol,
+        cost_price=holding.cost_price,
+        position_size=holding.position_size
+    )
+    if success:
+        return {"status": "success", "message": f"Updated {symbol}"}
+    else:
+        raise HTTPException(status_code=400, detail="Failed to update holding")
+
+@app.delete("/api/holdings/{symbol}")
+async def delete_holding(symbol: str):
+    """Remove a holding"""
+    success = database.remove_holding(symbol)
+    if success:
+        monitor_engine.refresh_targets()
+        return {"status": "success", "message": f"Removed {symbol}"}
+    else:
+        raise HTTPException(status_code=404, detail="Holding not found")
+
+@app.get("/api/selections")
+async def get_selections(date: str = None):
+    """Get daily selections from database"""
+    # If date is not provided, database layer handles retrieving the latest
+    return database.get_daily_selections(date)
 
 @app.post("/api/monitor/toggle")
 async def toggle_monitor():
@@ -113,6 +218,41 @@ async def toggle_monitor():
     status = "running" if market_state["is_monitoring"] else "paused"
     print(f"⏸️ Monitoring switched to: {status}")
     return {"status": status, "is_monitoring": market_state["is_monitoring"]}
+
+@app.post("/api/realtime/refresh")
+async def refresh_realtime_data():
+    """手动刷新一次实时行情数据（不依赖监控开关）"""
+    try:
+        print("📡 收到前端请求 - 刷新实时行情数据...")
+
+        # 1. 更新指数数据
+        index_data = monitor_engine.get_market_index()
+        market_state["index"] = index_data
+
+        # 2. 更新股票实时数据
+        stocks_data = monitor_engine.run_check()
+        market_state["stocks"] = stocks_data
+
+        # 3. 更新时间戳
+        market_state["last_update"] = datetime.now().strftime("%H:%M:%S")
+
+        print(f"✅ 实时数据刷新完成: {len(stocks_data)} 只股票, 指数: {index_data['name']} {index_data['price']}")
+
+        return {
+            "status": "success",
+            "stocks": stocks_data,
+            "index": index_data,
+            "last_update": market_state["last_update"],
+            "message": f"成功获取 {len(stocks_data)} 只股票实时数据"
+        }
+    except Exception as e:
+        print(f"❌ 实时数据刷新失败: {e}")
+        return {
+            "status": "error",
+            "message": f"数据获取失败: {str(e)}",
+            "stocks": [],
+            "index": market_state["index"]
+        }
 
 @app.post("/api/analyze/{symbol}")
 async def analyze_stock(symbol: str, background_tasks: BackgroundTasks):
@@ -334,6 +474,508 @@ async def get_report_status():
 @app.get("/api/report/logs")
 async def get_report_logs():
     return {"logs": list(report_logs)}
+
+# --- Single Stock Analysis ---
+
+single_analysis_status = {}  # {symbol: {"status": "idle"|"running"|"success"|"error", "message": "", "result": ""}}
+realtime_analysis_status = {} # {symbol: {"status": "idle"|"running"|"success"|"error", "message": "", "result": ""}}
+
+@app.post("/api/analyze/{symbol}/realtime")
+async def analyze_stock_realtime(symbol: str, background_tasks: BackgroundTasks):
+    """Trigger AI Real-time Intraday Analysis"""
+    if realtime_analysis_status.get(symbol, {}).get("status") == "running":
+        return JSONResponse(status_code=400, content={"message": f"{symbol} 盘中分析正在运行中"})
+
+    def _run_realtime_analysis():
+        realtime_analysis_status[symbol] = {"status": "running", "message": f"正在进行盘中诊断 {symbol}...", "result": ""}
+        
+        try:
+            from data_fetcher import fetch_data_dispatcher, calculate_start_date, fetch_stock_info
+            from indicator_calc import calculate_indicators, get_latest_metrics
+            from llm_analyst import generate_analysis
+            from monitor_engine import get_realtime_data
+            import markdown
+
+            # 1. Get stock info
+            # Try to get from holdings first, else fetch basic info
+            holdings = database.get_all_holdings()
+            stock_info = next((h for h in holdings if h['symbol'] == symbol), None)
+            
+            if not stock_info:
+                # If not in holdings, fetch basic info
+                basic_info = fetch_stock_info(symbol)
+                if basic_info:
+                     stock_info = {
+                         'symbol': symbol,
+                         'name': basic_info.get('name', symbol),
+                         'asset_type': 'stock', # Improve logic if needed
+                         'cost_price': None
+                     }
+                else:
+                    realtime_analysis_status[symbol] = {
+                        "status": "error",
+                        "message": f"无法获取 {symbol} 信息",
+                        "result": ""
+                    }
+                    return
+
+            # 2. Fetch historical context (need technical anchors like MA20, MA60)
+            start_date = calculate_start_date(120)
+            asset_type = stock_info.get('asset_type', 'stock')
+            df = fetch_data_dispatcher(symbol, asset_type, start_date)
+            
+            latest_history = {}
+            if df is not None and not df.empty:
+                df = calculate_indicators(df)
+                latest_history = get_latest_metrics(df, stock_info.get('cost_price', 0))
+            
+            # 3. Get Real-time Data (Crucial)
+            # We also want Market Index status to pass to AI
+            index_data = monitor_engine.get_market_index()
+            
+            realtime_dict = get_realtime_data([stock_info])
+            realtime_data = realtime_dict.get(symbol)
+            
+            if not realtime_data:
+                realtime_analysis_status[symbol] = {
+                    "status": "error",
+                    "message": "无法获取实时行情数据",
+                    "result": ""
+                }
+                return
+
+            # Inject market context into realtime_data for the prompt
+            realtime_data['market_index_price'] = index_data.get('price', 'N/A')
+            realtime_data['market_index_change'] = index_data.get('change_pct', 0)
+            
+            # 4. Load LLM Config
+            config = monitor_engine.load_config()
+            provider = config.get('api', {}).get('provider', 'openai')
+            llm_config = config.get(f'api_{provider}', config.get('llm_api', {}))
+            
+            if not llm_config.get('api_key'):
+                 realtime_analysis_status[symbol] = {"status": "error", "message": "LLM API Key missing"}
+                 return
+
+            # 5. Generate Analysis (Mode: realtime)
+            analysis = generate_analysis(
+                stock_info=stock_info,
+                tech_data=latest_history, # Anchors from history
+                api_config=llm_config,
+                analysis_type="realtime",
+                realtime_data=realtime_data
+            )
+            
+            # 6. Result
+            html_result = markdown.markdown(analysis, extensions=['tables'])
+            
+            realtime_analysis_status[symbol] = {
+                "status": "success",
+                "message": "诊断完成",
+                "result": html_result,
+                "raw": analysis,
+                "timestamp": datetime.now().strftime("%H:%M:%S")
+            }
+            
+        except Exception as e:
+            print(f"Realtime analysis error: {e}")
+            realtime_analysis_status[symbol] = {
+                "status": "error",
+                "message": str(e),
+                "result": ""
+            }
+
+    background_tasks.add_task(_run_realtime_analysis)
+    return {"status": "started", "message": f"开始诊断 {symbol}..."}
+
+@app.get("/api/analyze/{symbol}/realtime/status")
+async def get_realtime_analysis_status(symbol: str):
+    return realtime_analysis_status.get(symbol, {"status": "idle"})
+
+@app.post("/api/analyze/{symbol}/report")
+async def generate_single_stock_report(symbol: str, background_tasks: BackgroundTasks):
+    """Generate analysis report for a single stock"""
+    if single_analysis_status.get(symbol, {}).get("status") == "running":
+        return JSONResponse(status_code=400, content={"message": f"{symbol} 分析任务已在运行中"})
+
+    def _run_single_analysis():
+        single_analysis_status[symbol] = {"status": "running", "message": f"正在分析 {symbol}...", "result": ""}
+
+        try:
+            # Import main modules needed
+            from data_fetcher import fetch_data_dispatcher, calculate_start_date
+            from indicator_calc import calculate_indicators, get_latest_metrics
+            from llm_analyst import generate_analysis
+            from monitor_engine import get_realtime_data
+            import markdown
+
+            # 1. Get stock info from holdings
+            holdings = database.get_all_holdings()
+            stock_info = next((h for h in holdings if h['symbol'] == symbol), None)
+
+            if not stock_info:
+                single_analysis_status[symbol] = {
+                    "status": "error",
+                    "message": f"未找到股票 {symbol} 在持仓列表中",
+                    "result": ""
+                }
+                return
+
+            # 2. Fetch historical data
+            start_date = calculate_start_date(120)
+            asset_type = stock_info.get('asset_type', 'stock')
+            df = fetch_data_dispatcher(symbol, asset_type, start_date)
+
+            if df is None or df.empty:
+                single_analysis_status[symbol] = {
+                    "status": "error",
+                    "message": f"无法获取 {symbol} 的历史数据",
+                    "result": ""
+                }
+                return
+
+            # 3. Calculate indicators
+            df = calculate_indicators(df)
+
+            # 4. Get latest historical metrics (基于昨日收盘价的技术指标)
+            latest = get_latest_metrics(df, stock_info.get('cost_price', 0))
+
+            # 5. Get realtime price (获取实时价格)
+            realtime_dict = get_realtime_data([stock_info])
+            realtime_data = realtime_dict.get(symbol)
+
+            # 6. Update latest with realtime price if available
+            if realtime_data and realtime_data.get('price'):
+                print(f"📊 {symbol} - 历史收盘价: {latest.get('close')}, 实时价格: {realtime_data.get('price')}")
+                # Override close price with realtime price
+                latest['close'] = round(realtime_data.get('price'), 3)
+                latest['realtime_price'] = round(realtime_data.get('price'), 3)
+                latest['change_pct_today'] = round(realtime_data.get('change_pct', 0), 2)
+                # Update date to today since we have realtime data
+                latest['date'] = datetime.now().strftime('%Y-%m-%d')
+
+                # Recalculate profit/loss with realtime price
+                if stock_info.get('cost_price'):
+                    cost_price = stock_info['cost_price']
+                    profit_loss_pct = ((latest['close'] - cost_price) / cost_price) * 100
+                    latest['profit_loss_pct'] = round(profit_loss_pct, 2)
+            else:
+                print(f"⚠️ {symbol} - 无法获取实时价格，使用历史收盘价: {latest.get('close')}")
+
+            # 7. Load LLM config
+            config = monitor_engine.load_config()
+
+            # Resolve API config dynamically based on provider
+            provider = config.get('api', {}).get('provider', 'openai')
+            llm_config = config.get(f'api_{provider}', config.get('llm_api', {}))
+
+            if not llm_config.get('api_key'):
+                single_analysis_status[symbol] = {
+                    "status": "error",
+                    "message": f"LLM API 配置缺失 (Provider: {provider})",
+                    "result": ""
+                }
+                return
+
+            # 8. Generate AI analysis (使用包含实时价格的latest数据)
+            analysis = generate_analysis(
+                stock_info=stock_info,
+                tech_data=latest,
+                api_config=llm_config,
+                analysis_type="holding"
+            )
+
+            # 9. Format result
+            from llm_analyst import format_stock_section
+            formatted_report = format_stock_section(stock_info, latest, analysis)
+
+            # Convert to HTML for frontend display
+            html_result = markdown.markdown(formatted_report, extensions=['tables', 'fenced_code'])
+
+            # 10. Save analysis to database (保存实时价格)
+            analysis_data = {
+                'price': latest.get('close', 0),  # 现在是实时价格
+                'ma20': latest.get('ma20', 0),
+                'trend_signal': latest.get('ma_arrangement', '未知'),
+                'composite_score': latest.get('composite_score', 0),
+                'ai_analysis': formatted_report  # Save the full markdown report
+            }
+            analysis_date = datetime.now().strftime('%Y-%m-%d')
+
+            try:
+                database.save_holding_analysis(symbol, analysis_date, analysis_data)
+                print(f"✅ Analysis for {symbol} saved to database.")
+            except Exception as db_e:
+                print(f"⚠️ Failed to save analysis to DB: {db_e}")
+
+            single_analysis_status[symbol] = {
+                "status": "success",
+                "message": f"{symbol} 分析完成",
+                "result": html_result,
+                "raw": formatted_report
+            }
+
+        except Exception as e:
+            single_analysis_status[symbol] = {
+                "status": "error",
+                "message": f"分析失败: {str(e)}",
+                "result": ""
+            }
+
+    background_tasks.add_task(_run_single_analysis)
+    return {"status": "started", "message": f"🤖 正在生成 {symbol} 的分析报告..."}
+
+@app.get("/api/analyze/{symbol}/status")
+async def get_single_analysis_status(symbol: str):
+    """Get analysis status for a specific stock"""
+    status = single_analysis_status.get(symbol, {"status": "idle", "message": "", "result": ""})
+    return status
+
+@app.get("/api/analyze/{symbol}/latest")
+async def get_latest_analysis(symbol: str):
+    """Get the latest analysis report for a specific stock from database"""
+    try:
+        # Get holdings to find stock info
+        holdings = database.get_all_holdings()
+        stock_info = next((h for h in holdings if h['symbol'] == symbol), None)
+
+        if not stock_info:
+            return {"status": "not_found", "message": f"股票 {symbol} 不在持仓列表中"}
+
+        # Try to get analysis from database
+        try:
+            conn = database.get_connection()
+            cursor = conn.cursor()
+
+            # Query for the most recent analysis
+            cursor.execute("""
+                SELECT analysis_date, price, ma20, trend_signal, composite_score, ai_analysis
+                FROM holding_analysis
+                WHERE symbol = %s
+                ORDER BY analysis_date DESC
+                LIMIT 1
+            """, (symbol,))
+
+            result = cursor.fetchone()
+            cursor.close()
+            conn.close()
+
+            if result:
+                import markdown
+                # Convert markdown to HTML
+                html_result = markdown.markdown(result['ai_analysis'], extensions=['tables', 'fenced_code'])
+
+                return {
+                    "status": "success",
+                    "data": {
+                        "symbol": symbol,
+                        "name": stock_info['name'],
+                        "analysis_date": result['analysis_date'].strftime('%Y-%m-%d') if hasattr(result['analysis_date'], 'strftime') else str(result['analysis_date']),
+                        "price": result['price'],
+                        "ma20": result['ma20'],
+                        "trend_signal": result['trend_signal'],
+                        "composite_score": result['composite_score'],
+                        "ai_analysis": result['ai_analysis'],
+                        "html": html_result
+                    }
+                }
+            else:
+                return {"status": "no_data", "message": f"暂无 {symbol} 的分析报告"}
+
+        except Exception as db_error:
+            print(f"❌ Database query error for {symbol}: {db_error}")
+            return {"status": "error", "message": f"数据库查询失败: {str(db_error)}"}
+
+    except Exception as e:
+        print(f"❌ Error getting latest analysis for {symbol}: {e}")
+        return {"status": "error", "message": f"获取失败: {str(e)}"}
+
+# --- Candidate Stock Analysis ---
+
+candidate_analysis_status = {}  # {symbol: {"status": "idle"|"running"|"success"|"error", "message": "", "result": ""}}
+
+@app.post("/api/analyze/candidate/{symbol}")
+async def analyze_candidate_stock(symbol: str, background_tasks: BackgroundTasks):
+    """分析候选股票的买入机会（使用选股策略）"""
+    if candidate_analysis_status.get(symbol, {}).get("status") == "running":
+        return JSONResponse(status_code=400, content={"message": f"{symbol} 分析任务已在运行中"})
+
+    def _run_candidate_analysis():
+        candidate_analysis_status[symbol] = {"status": "running", "message": f"正在分析 {symbol}...", "result": ""}
+
+        try:
+            # Import main modules needed
+            from data_fetcher import fetch_data_dispatcher, calculate_start_date, fetch_stock_info
+            from indicator_calc import calculate_indicators, get_latest_metrics
+            from llm_analyst import generate_analysis
+            from monitor_engine import get_realtime_data
+            import markdown
+
+            # 1. Get stock basic info (从实时数据或搜索获取)
+            stock_info_basic = fetch_stock_info(symbol)
+
+            if not stock_info_basic:
+                candidate_analysis_status[symbol] = {
+                    "status": "error",
+                    "message": f"无法找到股票 {symbol} 的信息",
+                    "result": ""
+                }
+                return
+
+            stock_info = {
+                'symbol': symbol,
+                'name': stock_info_basic.get('name', symbol),
+                'asset_type': 'stock',  # 候选股默认为stock
+                'cost_price': None  # 候选股没有成本价
+            }
+
+            # 2. Fetch historical data
+            start_date = calculate_start_date(120)
+            asset_type = stock_info.get('asset_type', 'stock')
+            df = fetch_data_dispatcher(symbol, asset_type, start_date)
+
+            if df is None or df.empty:
+                candidate_analysis_status[symbol] = {
+                    "status": "error",
+                    "message": f"无法获取 {symbol} 的历史数据",
+                    "result": ""
+                }
+                return
+
+            # 3. Calculate indicators
+            df = calculate_indicators(df)
+
+            # 4. Get latest historical metrics (基于昨日收盘价的技术指标)
+            latest = get_latest_metrics(df, cost_price=None)
+
+            # 5. Get realtime price (获取实时价格)
+            realtime_dict = get_realtime_data([stock_info])
+            realtime_data = realtime_dict.get(symbol)
+
+            # 6. Update latest with realtime price if available
+            if realtime_data and realtime_data.get('price'):
+                print(f"📊 {symbol} - 历史收盘价: {latest.get('close')}, 实时价格: {realtime_data.get('price')}")
+                latest['close'] = round(realtime_data.get('price'), 3)
+                latest['realtime_price'] = round(realtime_data.get('price'), 3)
+                latest['change_pct_today'] = round(realtime_data.get('change_pct', 0), 2)
+                # Update date to today since we have realtime data
+                latest['date'] = datetime.now().strftime('%Y-%m-%d')
+            else:
+                print(f"⚠️ {symbol} - 无法获取实时价格，使用历史收盘价: {latest.get('close')}")
+
+            # 7. Load LLM config
+            config = monitor_engine.load_config()
+
+            # Resolve API config dynamically based on provider
+            provider = config.get('api', {}).get('provider', 'openai')
+            llm_config = config.get(f'api_{provider}', config.get('llm_api', {}))
+
+            if not llm_config.get('api_key'):
+                candidate_analysis_status[symbol] = {
+                    "status": "error",
+                    "message": f"LLM API 配置缺失 (Provider: {provider})",
+                    "result": ""
+                }
+                return
+
+            # 8. Generate AI analysis (使用候选股策略 - analysis_type="candidate")
+            analysis = generate_analysis(
+                stock_info=stock_info,
+                tech_data=latest,
+                api_config=llm_config,
+                analysis_type="candidate"  # 🔥 使用选股策略
+            )
+
+            # 9. Format result
+            from llm_analyst import format_stock_section
+            formatted_report = format_stock_section(stock_info, latest, analysis)
+
+            # Convert to HTML for frontend display
+            html_result = markdown.markdown(formatted_report, extensions=['tables', 'fenced_code'])
+
+            # 10. Optionally save to database (保存到候选股表)
+            try:
+                selection_data = {
+                    'symbol': stock_info['symbol'],
+                    'name': stock_info['name'],
+                    'close_price': latest['close'],
+                    'volume_ratio': latest.get('volume_ratio', 0),
+                    'composite_score': latest.get('composite_score', 0),
+                    'ai_analysis': formatted_report
+                }
+                analysis_date = datetime.now().strftime('%Y-%m-%d')
+                database.save_daily_selection(analysis_date, selection_data)
+                print(f"✅ Candidate analysis for {symbol} saved to database.")
+            except Exception as db_e:
+                print(f"⚠️ Failed to save candidate analysis to DB: {db_e}")
+
+            candidate_analysis_status[symbol] = {
+                "status": "success",
+                "message": f"{symbol} 候选股分析完成",
+                "result": html_result,
+                "raw": formatted_report,
+                "data": {
+                    "symbol": symbol,
+                    "name": stock_info['name'],
+                    "price": latest['close'],
+                    "score": latest.get('composite_score', 0)
+                }
+            }
+
+        except Exception as e:
+            candidate_analysis_status[symbol] = {
+                "status": "error",
+                "message": f"分析失败: {str(e)}",
+                "result": ""
+            }
+            print(f"❌ Candidate analysis error for {symbol}: {e}")
+
+    background_tasks.add_task(_run_candidate_analysis)
+    return {"status": "started", "message": f"🤖 正在分析候选股 {symbol}..."}
+
+@app.get("/api/analyze/candidate/{symbol}/status")
+async def get_candidate_analysis_status(symbol: str):
+    """Get candidate analysis status for a specific stock"""
+    status = candidate_analysis_status.get(symbol, {"status": "idle", "message": "", "result": ""})
+    return status
+
+# --- Strategy Management API ---
+
+@app.get("/api/strategies")
+async def list_strategies():
+    """List all strategies"""
+    return database.get_all_strategies()
+
+@app.get("/api/strategies/{slug}")
+async def get_strategy(slug: str):
+    """Get strategy details including params"""
+    strategy = database.get_strategy_by_slug(slug)
+    if not strategy:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    return strategy
+
+class StrategyTemplateUpdate(BaseModel):
+    template: str
+
+@app.post("/api/strategies/{id}/template")
+async def update_strategy_template(id: int, update: StrategyTemplateUpdate):
+    """Update strategy prompt template"""
+    success = database.update_strategy_template(id, update.template)
+    if success:
+        return {"status": "success", "message": "Updated template"}
+    raise HTTPException(status_code=400, detail="Update failed")
+
+class StrategyParamUpdate(BaseModel):
+    key: str
+    value: str
+
+@app.post("/api/strategies/{id}/params")
+async def update_strategy_param(id: int, param: StrategyParamUpdate):
+    """Update strategy parameter"""
+    success = database.update_strategy_param(id, param.key, param.value)
+    if success:
+        return {"status": "success", "message": f"Updated param {param.key}"}
+    raise HTTPException(status_code=400, detail="Update failed")
 
 if __name__ == "__main__":
     uvicorn.run("web_server:app", host="0.0.0.0", port=8100, reload=True, access_log=False)

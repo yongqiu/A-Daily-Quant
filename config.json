@@ -1,4 +1,12 @@
 {
+  "database": {
+    "type": "mysql",
+    "host": "localhost",
+    "port": 3306,
+    "user": "root",
+    "password": "",
+    "db": "db_daily_strategy"
+  },
   "api": {
     "provider": "gemini-openai"
   },
@@ -13,7 +21,13 @@
     "provider": "gemini-openai",
     "api_key": "your-api-key",
     "base_url": "http://127.0.0.1:9001/v1",
-    "model": "gemini-3-flash"
+    "model": "gemini-3-pro-low"
+  },
+  "api_glm": {
+    "provider": "glm",
+    "api_key": "a07a5c9c2d624a9a81be3ace6f0778d9.2yTNVpaIVUFA5qLn",
+    "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+    "model": "glm-4.7"
   },
   "api_deepseek": {
     "provider": "deepseek",
@@ -56,12 +70,6 @@
     "ma_short": 20,
     "ma_long": 60
   },
-  "monitor": {
-    "update_interval_seconds": 300,
-    "market_index_code": "sh000001",
-    "watch_list": [
-    ]
-  },
   "selection_rules": {
     "enabled": true,
     "min_change": 2.0,
@@ -69,10 +77,11 @@
     "min_volume_ratio": 1.5,
     "min_turnover": 3.0,
     "max_turnover": 15.0,
-    "min_mcap_b": 50,
+    "min_mcap_b": 30,
     "max_mcap_b": 1000,
     "exclude_loss_making": true,
-    "max_candidates_rough": 30,
+    "exclude_startup_board": true,
+    "max_candidates_rough": 100,
     "min_score": 70,
     "max_final_candidates": 3
   }

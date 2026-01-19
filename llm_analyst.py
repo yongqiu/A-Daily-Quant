@@ -15,63 +15,68 @@ except ImportError:
     GENAI_AVAILABLE = False
 
 
+import database
+from jinja2 import Template
+
+def get_prompt_from_db(slug: str, context: Dict[str, Any]) -> str:
+    """
+    Fetch prompt template from database and format with context using Jinja2
+    """
+    strategy = database.get_strategy_by_slug(slug)
+    if not strategy or not strategy.get('template_content'):
+        print(f"⚠️ Strategy {slug} not found in DB or empty. Fallback needed.")
+        return None
+        
+    try:
+        # DB content is now repaired to valid Jinja2 syntax by repair_db_prompts.py
+        template_str = strategy['template_content']
+        
+        # Create Jinja2 template and render
+        template = Template(template_str)
+        return template.render(**context)
+        
+    except Exception as e:
+        print(f"❌ Error generating prompt for {slug}: {e}")
+        return None
+        
+    except Exception as e:
+        print(f"❌ Error generating prompt for {slug}: {e}")
+        # print(f"Template was: {strategy.get('template_content', '')[:100]}...")
+        return None
+
 def create_risk_prompt(stock_info: Dict[str, Any], tech_data: Dict[str, Any]) -> str:
     """
     Create a strict RISK-FOCUSED prompt for existing HOLDINGS.
-    Focus: Capital preservation, stop-loss, profit taking.
+    NOW: Tries to load from DB 'stock_holding_risk', else fallback.
     """
-    print(f"股票：{stock_info['symbol']} - {stock_info['name']} AI 分析（非ETF）")
-    prompt = f"""作为严格的A股风险控制官，你的核心任务是保护本金。请基于以下数据分析这只【个股持仓】（非ETF）。
+    print(f"股票：{stock_info['symbol']} - {stock_info['name']} AI 分析（个股风控 - Strategy）")
+    
+    # 1. Fetch dynamic params for context optimization
+    context_params = {}
+    try:
+        strategy = database.get_strategy_by_slug('stock_holding_risk')
+        if strategy and strategy.get('params'):
+            # Pass these params to Jinja2 context so prompt can use them
+            # e.g. {{ params.risk_sensitivity }}
+            context_params = strategy['params']
+            
+            # Logic hook: If 'enable_news_analysis' is explicitly false in DB, we could hide news
+            # But currently we let the Prompt Template decide how to use the variable
+    except Exception:
+        pass
 
-**股票：** {stock_info['symbol']} - {stock_info['name']}
-**价格：** ¥{tech_data['close']} (成本价 ¥{stock_info.get('cost_price', '未设置')}, 盈亏 {tech_data.get('profit_loss_pct', '未知')}%)
+    db_prompt = get_prompt_from_db('stock_holding_risk', {
+        'stock_info': stock_info,
+        'tech_data': tech_data,
+        'params': context_params  # Expose params to template
+    })
+    
+    if db_prompt:
+        return db_prompt
 
-**📊 综合评分：{tech_data.get('composite_score', 'N/A')}分 - {tech_data.get('rating', '未知')}**
-
-**技术指标（{tech_data['date']}）：**
-
-1. 均线系统：
-   - MA5=¥{tech_data.get('ma5', 'N/A')}, MA10=¥{tech_data.get('ma10', 'N/A')}, MA20=¥{tech_data['ma20']}, MA60=¥{tech_data['ma60']}
-   - 均线排列：{tech_data.get('ma_arrangement', '未知')}
-   - 距MA20：{tech_data['distance_from_ma20']}% ({'上方' if tech_data.get('distance_from_ma20', 0) > 0 else '下方'})
-
-2. MACD：DIF={tech_data['macd_dif']}, DEA={tech_data['macd_dea']}, 柱={tech_data['macd_hist']} ({tech_data['macd_signal']})
-
-3. RSI（14日）：{tech_data.get('rsi', 'N/A')} - {tech_data.get('rsi_signal', '未知')}
-
-4. KDJ：K={tech_data.get('kdj_k', 'N/A')}, D={tech_data.get('kdj_d', 'N/A')}, J={tech_data.get('kdj_j', 'N/A')}
-   - 信号：{tech_data.get('kdj_signal', '未知')} | 区域：{tech_data.get('kdj_zone', '未知')}
-
-5. 布林带：
-   - 上轨=¥{tech_data.get('boll_upper', 'N/A')}, 中轨=¥{tech_data.get('boll_mid', 'N/A')}, 下轨=¥{tech_data.get('boll_lower', 'N/A')}
-   - 位置：{tech_data.get('boll_signal', '未知')}（{tech_data.get('boll_position', 'N/A')}%）
-
-6. 支撑压力：
-   - 压力位=¥{tech_data.get('resistance', 'N/A')}（距离{tech_data.get('distance_to_resistance', 'N/A')}%）
-   - 支撑位=¥{tech_data.get('support', 'N/A')}（距离{tech_data.get('distance_to_support', 'N/A')}%）
-
-8. ⚠️ 动态风控 (ATR)：
-   - ATR(14)=¥{tech_data.get('atr', 'N/A')} (波动率 {tech_data.get('atr_pct', 'N/A')}%)
-   - 建议止损位 (2ATR)=¥{tech_data.get('stop_loss_suggest', 'N/A')}
-   - 仓位控制：波动越大，仓位越小
-
-9. 量价分析：
-   - 量比：{tech_data.get('volume_ratio', 'N/A')}
-   - 量价形态：{tech_data.get('volume_pattern', '未知')}
-
-**持仓纪律规则（防守优先）：**
-1. 价格<MA20 且 均线空头排列 → 必须建议减仓/等待。
-2. RSI>70 或 KDJ>80 或 布林带位置>80% → 警告超买风险（考虑止盈）。
-3. ATR风控：必须参考ATR建议的动态止损位。
-4. 放量下跌=严重警告。
-5. 综合评分<50偏空，50-65中性，>65偏多。
-
-**请提供：**
-1. 趋势健康度评估（是否破坏？）
-2. 明确的操作建议：**坚定持有** / **减仓止盈** / **止损离场** / **观望**
-3. 重点风控位：止损价和压力位。
-
-用中文，简洁直接，条理清晰。"""
+    # Fallback (Hardcoded)
+    prompt = f"""作为严格的A股风险控制官... (DB Fetch Failed)
+    请分析 {stock_info['symbol']} ..."""
     return prompt
 
 
@@ -139,153 +144,53 @@ def create_future_prompt(stock_info: Dict[str, Any], tech_data: Dict[str, Any]) 
 def create_etf_holding_prompt(stock_info: Dict[str, Any], tech_data: Dict[str, Any]) -> str:
     """
     Create a LONG-TERM FOCUSED prompt for ETFs.
-    Focus: Macro trend, moving averages, overbought/oversold, less noise.
+    NOW: Tries to load from DB 'etf_holding_steady'.
     """
-    print(f"股票：{stock_info['symbol']} - {stock_info['name']} AI 分析（ETF）")
-    prompt = f"""作为一名资产配置专家，你注重【ETF】的长期趋势和稳健收益。请基于以下数据分析这只【ETF持仓】。
+    print(f"股票：{stock_info['symbol']} - {stock_info['name']} AI 分析（ETF定投 - Strategy）")
     
-**ETF：** {stock_info['symbol']} - {stock_info['name']}
-**价格：** ¥{tech_data['close']} (成本价 ¥{stock_info.get('cost_price', '未设置')})
-
-**📈 趋势状态：**
-- MA20=¥{tech_data['ma20']} | MA60=¥{tech_data['ma60']}
-- 当前价格与MA60关系：{'上方 (多头)' if tech_data.get('close') > tech_data.get('ma60') else '下方 (空头/调整)'}
-- 均线排列：{tech_data.get('ma_arrangement', '未知')}
-
-**📉 波动指标：**
-- RSI (14)：{tech_data.get('rsi', 'N/A')} (高于80为严重超买，低于20为严重超卖)
-- KDJ：{tech_data.get('kdj_signal', '未知')} ({tech_data.get('kdj_zone', '未知')})
-- MACD：{tech_data['macd_signal']}
-
-**ETF策略规则（稳健）：**
-1. **忽略日内波动**：不要被1-2%的涨跌幅惊扰，除非发生趋势性逆转。
-2. **生命线原则**：只要价格在 MA60 (中期趋势线) 之上，原则上保持持有。
-3. **左侧交易机会**：如果 RSI < 30 或 价格触及布林下轨，往往是分批补仓（定投）的好机会，而不是止损点。
-4. **右侧止盈**：只有当明显跌破 MA20 且无法收回，或 RSI > 80 时，才考虑做波段减仓。
-
-**请提供：**
-1. **趋势研判**：当前处于上涨中继、底部震荡还是下跌趋势？
-2. **操作建议**：**继续持有** / **逢低加仓** / **分批减仓** / **清仓观望**
-3. **理由**：请用稳健投资者的口吻简述理由。
-
-用中文，简洁稳重。"""
-    return prompt
+    db_prompt = get_prompt_from_db('etf_holding_steady', {
+        'stock_info': stock_info,
+        'tech_data': tech_data
+    })
+    
+    if db_prompt:
+        return db_prompt
+        
+    # Fallback
+    return "DB Error: etf_holding_steady prompt not found."
 
 
 def create_opportunity_prompt(stock_info: Dict[str, Any], tech_data: Dict[str, Any]) -> str:
     """
     Create an OPPORTUNITY-FOCUSED prompt for STOCK CANDIDATES.
-    Focus: Trend strength, entry points, breakout validity.
+    NOW: Tries to load from DB 'candidate_growth'.
     """
-    prompt = f"""作为一名激进的成长股交易员，你的任务是挖掘具有爆发潜力的【选股标的】。请基于以下数据分析这只股票的买入价值。
+    db_prompt = get_prompt_from_db('candidate_growth', {
+        'stock_info': stock_info,
+        'tech_data': tech_data
+    })
+    
+    if db_prompt:
+        return db_prompt
 
-**股票：** {stock_info['symbol']} - {stock_info['name']}
-**现价：** ¥{tech_data['close']}
-
-**📊 综合评分：{tech_data.get('composite_score', 'N/A')}分 - {tech_data.get('rating', '未知')}**
-*(评分逻辑：偏重强势动量和量价配合)*
-
-**技术关键点（{tech_data['date']}）：**
-
-1. **趋势强度**：
-   - 价格相对于MA20：{tech_data['distance_from_ma20']}% (正值代表多头强势)
-   - 均线排列：{tech_data.get('ma_arrangement', '未知')} (多头排列最佳)
-   - MA5/MA10/MA20/MA60：¥{tech_data.get('ma5', 'N/A')} / ¥{tech_data.get('ma10', 'N/A')} / ¥{tech_data['ma20']} / ¥{tech_data['ma60']}
-
-2. **动量指标**：
-   - RSI (14)：{tech_data.get('rsi', 'N/A')} (注意：强势股RSI往往维持在60-80区间)
-   - MACD：{tech_data['macd_signal']} (DIF={tech_data['macd_dif']}, 柱={tech_data['macd_hist']})
-
-3. **量能确认**：
-   - 量比：{tech_data.get('volume_ratio', 'N/A')} (大于1.5视为活跃)
-   - 形态：{tech_data.get('volume_pattern', '未知')} (放量上涨最理想)
-
-4. **位置与空间**：
-   - 布林带位置：{tech_data.get('boll_position', 'N/A')}% (接近上轨可能即将突破或回调)
-   - 上方压力位：¥{tech_data.get('resistance', 'N/A')}
-   - ATR波动率：{tech_data.get('atr_pct', 'N/A')}%
-
-**选股判断逻辑（进攻优先）：**
-1. **强势股特征**：高RSI (>60) 和 布林带上轨运行 对于强势股是常态，不视为单纯的卖出信号，而是动量强劲的表现。
-2. **买点确认**：重点关注是否有“放量突破”、“回踩MA20不破”或“均线刚发散”等买入形态。
-3. **陷阱识别**：如果量比太小(<0.8)或高位放巨量滞涨，提示风险。
-4. **盈亏比**：上涨空间是否大于下跌空间？
-
-**请提供：**
-1. **主要看点**：为什么这只股票值得关注？（动量、突破、量能）
-
-2. **明日开盘剧本推演（重要）：**
-   请分别针对以下三种开盘情况给出具体操作指令：
-   - **剧本A（高开强势 >2%）：** 追涨条件（如：量比>3且不破分时均线）与入场点。
-   - **剧本B（平开/小幅震荡）：** 最佳低吸位置（如：回踩MA5或关键均线时的止跌信号）。
-   - **剧本C（不及预期/低开）：** 观望条件（如：跌破某价位直接放弃）。
-
-3. **风控计划**：
-   - 止损位：必须给出具体价格。
-   - 目标位：第一目标位。
-
-用中文，语气要像资深交易员一样犀利。**对于开盘剧本的推演要具体、有操作性，不要讲空话。**"""
-    return prompt
+    return "DB Error: candidate_growth prompt not found."
 
 
 def create_realtime_prompt(stock_info: Dict[str, Any], history_data: Dict[str, Any], realtime_data: Dict[str, Any]) -> str:
     """
     Create a REAL-TIME ACTION prompt.
-    Combines historical tech context with current live market data AND market sentiment.
+    NOW: Tries to load from DB 'realtime_intraday'.
     """
-    # Safe retrieval for new fields
-    index_price = realtime_data.get('market_index_price', 'N/A')
-    index_change = realtime_data.get('market_index_change', 0)
-    turnover = realtime_data.get('turnover_rate', 'N/A')
+    db_prompt = get_prompt_from_db('realtime_intraday', {
+        'stock_info': stock_info,
+        'tech_data': history_data,
+        'realtime_data': realtime_data
+    })
     
-    # Simple market sentiment text
-    market_sentiment = "震荡"
-    if isinstance(index_change, (int, float)):
-        if index_change > 1.0: market_sentiment = "强势上涨"
-        elif index_change > 0.3: market_sentiment = "温和反弹"
-        elif index_change < -1.0: market_sentiment = "恐慌下跌"
-        elif index_change < -0.3: market_sentiment = "弱势调整"
+    if db_prompt:
+        return db_prompt
 
-    prompt = f"""作为一名拥有10年经验的A股短线交易员，正在进行紧张的实盘盯盘。请结合【大盘环境】、【个股实时走势】和【历史技术面】做出现场决策。
-
-**一、大盘环境 (Market Context)**
-- **上证指数**：{index_price} (涨跌幅: {index_change}%) -> **市场情绪：{market_sentiment}**
-- *(注意：个股逆势拉升往往更显强势，但如果大盘跳水，需警惕补跌风险)*
-
-**二、个股实时数据 (Real-time Snapshot)**
-- **标的**：{stock_info['name']} ({stock_info['symbol']})
-- **现价**：¥{realtime_data['price']} (涨跌: **{realtime_data['change_pct']}%**)
-- **量能**：量比 **{realtime_data.get('volume_ratio', 'N/A')}** (关键指标！>1.5为放量, >3为巨量攻击)
-- **换手率**：{turnover}% (结合分时图判断交投活跃度)
-- **开盘形态**：今开¥{realtime_data.get('open', 'N/A')} | 昨收¥{realtime_data.get('pre_close', 'N/A')}
-- **日内振幅**：最高¥{realtime_data.get('high', 'N/A')} / 最低¥{realtime_data.get('low', 'N/A')}
-
-**三、技术面锚点 (Technical Anchors)**
-- **趋势生命线**：MA20 = ¥{history_data.get('ma20', 'N/A')} (现价在此之{'上' if realtime_data['price'] > history_data.get('ma20', 0) else '下'})
-- **短期攻击线**：MA5 = ¥{history_data.get('ma5', 'N/A')}
-- **关键位置**：上方压力=¥{history_data.get('resistance', 'N/A')}，下方支撑=¥{history_data.get('support', 'N/A')}
-- **超买超卖**：昨日RSI(14)= {history_data.get('rsi', 'N/A')}
-
-**四、决策逻辑链**
-1. **异动定性**：
-   - 当前上涨是“放量突破”还是“无量诱多”？（看量比）
-   - 当前下跌是“缩量洗盘”还是“放量出逃”？
-2. **位置确认**：
-   - 如果价格在压力位附近且量能不足 -> 风险！
-   - 如果价格回踩MA5/支撑位且止跌回升 -> 机会！
-3. **环境共振**：
-   - 大盘{market_sentiment}背景下，该股表现是强于大盘还是弱于大盘？
-
-**五、请给出明确指令 (Output Format)**
-请模拟实战喊单风格，极简、果断：
-
-1. **【态势判定】**：(例如：放量逆势突破 / 缩量回踩支撑 / 跟风下跌破位)
-2. **【核心信号】**：(列出最促使你做出决策的1-2个数据，如：量比3.5且突破压力位)
-3. **【操作指令】**：**【买入】(激进/稳健) / 【加仓】 / 【减仓】(止盈/止损) / 【观望】** (必选其一)
-4. **【盯盘红线】**：(给出具体的**止损价**或**目标价**，例如：跌破 15.20 必须走)
-
-"""
-    return prompt
+    return "DB Error: realtime_intraday prompt not found."
 
 
 def create_realtime_etf_prompt(stock_info: Dict[str, Any], history_data: Dict[str, Any], realtime_data: Dict[str, Any]) -> str:
@@ -483,7 +388,7 @@ def generate_analysis_gemini(
             contents=prompt,
             config=types.GenerateContentConfig(
                 temperature=0.3,
-                max_output_tokens=2048,
+                max_output_tokens=8192,
                 system_instruction=system_instruction
             )
         )
@@ -514,7 +419,8 @@ def generate_analysis_openai(
     base_url: str,
     model: str = "deepseek-chat",
     analysis_type: str = "holding",
-    realtime_data: Dict[str, Any] = None
+    realtime_data: Dict[str, Any] = None,
+    provider: str = "openai"
 ) -> str:
     """
     Generate LLM-based trading analysis using OpenAI-compatible API
@@ -550,9 +456,10 @@ def generate_analysis_openai(
         elif asset_type == 'future':
              system_content = "你是一名专业的期货交易员。"
 
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
+        # Prepare API call parameters
+        api_params = {
+            "model": model,
+            "messages": [
                 {
                     "role": "system",
                     "content": system_content
@@ -562,9 +469,19 @@ def generate_analysis_openai(
                     "content": prompt
                 }
             ],
-            temperature=0.3, # Low temp for consistent trading signals
-            max_tokens=2048
-        )
+            "temperature": 0.3,  # Low temp for consistent trading signals
+            "max_tokens": 4096
+        }
+
+        # Add thinking parameter for GLM provider
+        if provider == "glm":
+            api_params["extra_body"] = {
+                "thinking":{
+                    "type": "disabled"
+                }
+            }
+
+        response = client.chat.completions.create(**api_params)
         
         analysis = response.choices[0].message.content
         return analysis
@@ -599,7 +516,7 @@ def generate_analysis(
             realtime_data=realtime_data
         )
     else:
-        # OpenAI 兼容的 API（包括 OpenAI, DeepSeek 等）
+        # OpenAI 兼容的 API（包括 OpenAI, DeepSeek, GLM 等）
         return generate_analysis_openai(
             stock_info=stock_info,
             tech_data=tech_data,
@@ -607,7 +524,8 @@ def generate_analysis(
             base_url=api_config['base_url'],
             model=api_config['model'],
             analysis_type=analysis_type,
-            realtime_data=realtime_data
+            realtime_data=realtime_data,
+            provider=provider
         )
 
 
@@ -643,6 +561,7 @@ def format_etf_section(stock_info: Dict[str, Any], tech_data: Dict[str, Any], ll
     
     section = f"""
 ## {stock_info['symbol']} - {stock_info['name']} 【ETF】
+### 📅 报告日期：{tech_data.get('date', '未知')}
 
 ### 📊 ETF长期持有评分：{score}分 - {rating}
 
@@ -688,6 +607,82 @@ def format_etf_section(stock_info: Dict[str, Any], tech_data: Dict[str, Any], ll
     return section
 
 
+import re
+import json
+
+def format_json_plan(text: str) -> str:
+    """
+    Helper to extract and format JSON trading plan from LLM output
+    """
+    json_str = None
+    
+    # 1. Try to find Markdown code block first (Most reliable)
+    # Match ```json ... ``` or just ``` ... ``` containing buy_trigger
+    code_block_match = re.search(r'```(?:json)?\s*(\{.*?"buy_trigger".*?\})\s*```', text, re.DOTALL)
+    if code_block_match:
+        json_str = code_block_match.group(1)
+    else:
+        # 2. Fallback to raw JSON object search
+        # Use non-greedy match for content to avoid capturing too much
+        # But we need to balance braces... Regex is bad at recursion.
+        # Simple heuristic: Match from first { to last }
+        match = re.search(r'(\{.*"buy_trigger".*\})', text, re.DOTALL)
+        if match:
+             # Refine: Try to cut off at the last valid closing brace if multiple present
+             # This is a bit hacky but works for simple LLM outputs
+             candidate = match.group(1)
+             json_str = candidate
+
+    if not json_str:
+        return text
+
+    try:
+        # Cleanups for common LLM JSON errors
+        # 1. Remove comments // ...
+        json_str_clean = re.sub(r'//.*', '', json_str)
+        # 2. Fix trailing commas (simple case: , before })
+        json_str_clean = re.sub(r',\s*\}', '}', json_str_clean)
+        
+        plan = json.loads(json_str_clean)
+        
+        # Build Table
+        table = "\n\n**🎯 交易执行计划 (Action Plan)**\n\n"
+        table += "| 项目 | 内容 | 备注 |\n"
+        table += "|---|---|---|\n"
+        
+        # Mapping keys to readable names
+        mapping = {
+            "buy_trigger": "🚀 买入触发",
+            "buy_price_max": "🚫 最高追涨",
+            "buy_dip_price": "💰 低吸参考",
+            "stop_loss_price": "🛡 严格止损",
+            "take_profit_target": "🎯 止盈目标",
+            "risk_rating": "⚠️ 风险等级"
+        }
+        
+        for key, label in mapping.items():
+            val = plan.get(key, "--")
+            # Ensure value is string
+            if not isinstance(val, str):
+                val = str(val)
+            # Escape pipes to avoid breaking markdown table
+            val = val.replace("|", "\|")
+            table += f"| **{label}** | {val} | |\n"
+            
+        # Replace the JSON part in original text with the table
+        # Note: We replace the originally matched string (json_str) which comes from text
+        # If we cleaned it, we still replace the original subset in 'text'
+        
+        # If we successfully parsed, we want to replace the whole code block if it existed
+        if code_block_match:
+            return text.replace(code_block_match.group(0), table)
+        else:
+            return text.replace(json_str, table)
+        
+    except Exception as e:
+        print(f"JSON Parse Error: {e}")
+        return text
+
 def format_stock_section(stock_info: Dict[str, Any], tech_data: Dict[str, Any], llm_analysis: str) -> str:
     """
     Format a complete stock analysis section in Markdown
@@ -697,66 +692,56 @@ def format_stock_section(stock_info: Dict[str, Any], tech_data: Dict[str, Any], 
     if tech_data.get('score_type') == 'etf':
         return format_etf_section(stock_info, tech_data, llm_analysis)
     
+    # 注意：现在 LLM 直接输出 Markdown 表格，无需再调用 format_json_plan 解析
+    # formatted_analysis = format_json_plan(llm_analysis)
+    
     # 综合评分显示
     score = tech_data.get('composite_score', 'N/A')
     rating = tech_data.get('rating', '未知')
     
     # 评分详情
     score_breakdown = tech_data.get('score_breakdown', [])
-    score_details = tech_data.get('score_details', [])
     
     score_section = ""
     if score_breakdown:
-        score_section = "\n**评分明细：**\n"
+        score_section = "\n**📊 评分明细：**\n"
         for name, got, total in score_breakdown:
-            score_section += f"- {name}：{got}/{total}分\n"
+             # 计算填充进度条 (visual bar)
+            filled = int(got / total * 10) if total > 0 else 0
+            bar = "▮" * filled + "▯" * (10 - filled)
+            score_section += f"- {name}：`{bar}` {got}/{total}\n"
     
+    # 操作建议
+    operation_suggestion = tech_data.get('operation_suggestion', '暂无建议')
+
+    # 新闻区块
+    news_content = tech_data.get('latest_news', None)
+    news_block = ""
+    if news_content and news_content != "暂无新闻":
+        news_block = f"""
+**📰 消息面/题材 (News/Catalyst)：**
+> {news_content}
+"""
+
     section = f"""
 ## {stock_info['symbol']} - {stock_info['name']}
+### 📅 报告日期：{tech_data.get('date', '未知')}
 
-### 📊 综合评分：{score}分 - {rating}
+### 🚀 综合评分：{score}分 - {rating}
+
+**💡 策略建议：{operation_suggestion}**
+
 {score_section}
-**价格数据（{tech_data['date']}）：**
-- 当前价：¥{tech_data['close']} | 开盘：¥{tech_data['open']} | 最高：¥{tech_data['high']} | 最低：¥{tech_data['low']}
-- 成本价：¥{stock_info.get('cost_price', '未设置')} | 盈亏：{tech_data.get('profit_loss_pct', '未知')}%
-- 涨跌幅：{tech_data['price_change_pct']}%
 
-**均线系统：**
-- MA5：¥{tech_data.get('ma5', 'N/A')} | MA10：¥{tech_data.get('ma10', 'N/A')} | MA20：¥{tech_data['ma20']} | MA60：¥{tech_data['ma60']}
-- 均线排列：**{tech_data.get('ma_arrangement', '未知')}**
-- 距离MA20：**{tech_data['distance_from_ma20']}%** ({'上方' if tech_data['distance_from_ma20'] > 0 else '下方'})
+**📈 核心技术信号 (Key Signals)：**
+- **趋势**：MA20排列 **{tech_data.get('ma_arrangement', '未知')}** (价格在MA20{'上方' if tech_data.get('distance_from_ma20', 0) > 0 else '下方'})
+- **动量**：RSI(14)=**{tech_data.get('rsi', 'N/A')}** | 量比=**{tech_data.get('volume_ratio', 'N/A')}**
+- **结构**：距120日高点 **{f"{tech_data['price_vs_high120']:.2%}" if tech_data.get('price_vs_high120') is not None else 'N/A'}** (越近越好)
+- **风控**：ATR波动率 **{tech_data.get('atr_pct', 'N/A')}%** | 建议止损 **¥{tech_data.get('stop_loss_suggest', 'N/A')}**
 
-**动量指标：**
-- MACD：DIF={tech_data['macd_dif']}, DEA={tech_data['macd_dea']}, 柱={tech_data['macd_hist']} → **{tech_data['macd_signal']}**
-- RSI（14）：**{tech_data.get('rsi', 'N/A')}** → {tech_data.get('rsi_signal', '未知')}
-- KDJ：K={tech_data.get('kdj_k', 'N/A')}, D={tech_data.get('kdj_d', 'N/A')}, J={tech_data.get('kdj_j', 'N/A')} → **{tech_data.get('kdj_signal', '未知')}** ({tech_data.get('kdj_zone', '未知')})
+{news_block}
 
-**布林带：**
-- 上轨：¥{tech_data.get('boll_upper', 'N/A')} | 中轨：¥{tech_data.get('boll_mid', 'N/A')} | 下轨：¥{tech_data.get('boll_lower', 'N/A')}
-- 位置：**{tech_data.get('boll_signal', '未知')}**（{tech_data.get('boll_position', 'N/A')}%）| 带宽：{tech_data.get('boll_width', 'N/A')}%
-
-**⚡️ 动态风控 (ATR)：**
-- ATR(14)=**¥{tech_data.get('atr', 'N/A')}** | 波动率：{tech_data.get('atr_pct', 'N/A')}%
-- 建议止损位：**¥{tech_data.get('stop_loss_suggest', 'N/A')}** (2倍ATR)
-
-**支撑压力：**
-- 压力位：¥{tech_data.get('resistance', 'N/A')}（距离 {tech_data.get('distance_to_resistance', 'N/A')}%）
-- 支撑位：¥{tech_data.get('support', 'N/A')}（距离 {tech_data.get('distance_to_support', 'N/A')}%）
-
-**量价分析：**
-- 成交量：{tech_data.get('volume', 'N/A')} | 均量：{tech_data.get('volume_ma', 'N/A')} | 量比：**{tech_data.get('volume_ratio', 'N/A')}**
-- 量价形态：**{tech_data.get('volume_pattern', '未知')}** | 确认：{tech_data.get('volume_confirmation', '未知')}
-
-**信号汇总：**
-| 指标 | 信号 |
-|------|------|
-| 趋势（MA20）| {tech_data['trend_signal']} |
-| MACD | {tech_data['macd_signal']} |
-| RSI | {tech_data.get('rsi_signal', '未知')} |
-| KDJ | {tech_data.get('kdj_signal', '未知')} |
-| 量价 | {tech_data.get('volume_pattern', '未知')} |
-
-**🤖 AI分析：**
+**🤖 AI 深度复盘与计划：**
 {llm_analysis}
 
 ---

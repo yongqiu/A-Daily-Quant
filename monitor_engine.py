@@ -15,6 +15,7 @@ from data_fetcher import fetch_data_dispatcher, calculate_start_date
 from indicator_calc import calculate_indicators, get_latest_metrics
 from llm_analyst import generate_analysis
 from etf_score import apply_etf_score
+import database
 
 # --- Configuration ---
 CONFIG_PATH = "config.json"
@@ -212,7 +213,8 @@ def get_realtime_data(targets: List[Dict[str, Any]]) -> Dict[str, Any]:
     return results
 
 # --- Strategy Configuration ---
-STRATEGY_RULES = {
+# Default rules as fallback
+DEFAULT_STRATEGY_RULES = {
     "stock": {
         "change_threshold": 4.0,       # A股大涨大跌阈值
         "volume_ratio_threshold": 2.0, # 量比阈值
@@ -239,6 +241,43 @@ STRATEGY_RULES = {
     }
 }
 
+def get_realtime_rules(asset_type: str = 'stock') -> Dict[str, Any]:
+    """
+    Get realtime monitoring rules, merging logic:
+    DB (realtime_intraday) > Default Code
+    """
+    # 1. Start with defaults
+    rules = DEFAULT_STRATEGY_RULES.get(asset_type, DEFAULT_STRATEGY_RULES['stock']).copy()
+    
+    # 2. If it's stock/general, try to load from DB 'realtime_intraday'
+    if asset_type in ['stock', 'etf']: # Currently we only migrated stock params mainly
+        try:
+            strategy = database.get_strategy_by_slug('realtime_intraday')
+            if strategy and strategy.get('params'):
+                db_params = strategy['params']
+                
+                # Careful mapping needed as DB uses flat keys currently
+                # We map specifically for what we use in check_strategy
+                type_mapping = {
+                    'change_threshold': float,
+                    'volume_ratio_threshold': float,
+                    'gap_threshold': float,
+                    'check_volume': lambda x: str(x).lower() == 'true',
+                    'check_gap': lambda x: str(x).lower() == 'true'
+                }
+                
+                for key, val_str in db_params.items():
+                    if key in type_mapping and key in rules:
+                         try:
+                             rules[key] = type_mapping[key](val_str)
+                         except ValueError:
+                             pass
+        except Exception as e:
+            # Silent fail to default
+            pass
+            
+    return rules
+
 def check_strategy(stock_data: Dict[str, Any], strategy_type: str = "general") -> Dict[str, Any]:
     """
     Check if a stock meets alert criteria based on real-time data AND asset type.
@@ -251,22 +290,22 @@ def check_strategy(stock_data: Dict[str, Any], strategy_type: str = "general") -
     volume_ratio = stock_data.get('volume_ratio')
     asset_type = stock_data.get('asset_type', 'stock')
     
-    # Get rules for this asset type, default to stock if unknown
-    rules = STRATEGY_RULES.get(asset_type, STRATEGY_RULES['stock'])
+    # Get rules for this asset type, with DB override support
+    rules = get_realtime_rules(asset_type)
     
     if price is None:
         return {"status": "error", "alerts": []}
         
     # --- Rule 1: Volume Spike (放量异动) ---
-    if rules['check_volume']:
-        threshold = rules['volume_ratio_threshold']
+    if rules.get('check_volume', True):
+        threshold = rules.get('volume_ratio_threshold', 2.0)
         # Condition: Volume Ratio > threshold AND Price is rising
         if volume_ratio and volume_ratio > threshold and change_pct > 0.3:
             alerts.append(f"量比爆发 ({volume_ratio})")
             status = "warning"
         
     # --- Rule 2: Surge/Plunge (急涨急跌) ---
-    limit = rules['change_threshold']
+    limit = rules.get('change_threshold', 4.0)
     if change_pct > limit:
         alerts.append(f"大涨 ({change_pct}%)")
         status = "warning"
@@ -275,10 +314,10 @@ def check_strategy(stock_data: Dict[str, Any], strategy_type: str = "general") -
         status = "warning"
         
     # --- Rule 3: Gap Opening (跳空高开) ---
-    if rules['check_gap']:
+    if rules.get('check_gap', True):
         open_price = stock_data.get('open')
         pre_close = stock_data.get('pre_close')
-        gap_limit = rules['gap_threshold']
+        gap_limit = rules.get('gap_threshold', 2.0)
         
         if open_price and pre_close and pre_close > 0:
             open_pct = (open_price - pre_close) / pre_close * 100
@@ -325,18 +364,14 @@ class MonitorEngine:
                 })
 
         # 1. Portfolio (Merged with higher priority for display)
+        # Load from Config (Legacy)
         if 'portfolio' in self.config:
             for p in self.config['portfolio']:
-                # Check duplication
                 existing = next((t for t in new_targets if t['symbol'] == p['symbol']), None)
-                
-                # Detect asset type
                 asset_type = p.get('asset_type') or p.get('type') or 'stock'
-                
                 if existing:
-                    # Upgrade type to holding if it's already there
                     existing['type'] = 'holding'
-                    existing['asset_type'] = asset_type # Update asset type
+                    existing['asset_type'] = asset_type
                 else:
                     new_targets.append({
                         "symbol": p['symbol'],
@@ -344,6 +379,26 @@ class MonitorEngine:
                         "type": "holding",
                         "asset_type": asset_type
                     })
+        
+        # Load from Database (Primary)
+        try:
+            db_holdings = database.get_all_holdings()
+            for h in db_holdings:
+                existing = next((t for t in new_targets if t['symbol'] == h['symbol']), None)
+                asset_type = h.get('asset_type') or h.get('type') or 'stock'
+                
+                if existing:
+                    existing['type'] = 'holding'
+                    existing['asset_type'] = asset_type
+                else:
+                    new_targets.append({
+                        "symbol": h['symbol'],
+                        "name": h['name'],
+                        "type": "holding",
+                        "asset_type": asset_type
+                    })
+        except Exception as e:
+            print(f"⚠️ Error loading holdings from DB: {e}")
                 
         # 2. Daily Candidates
         # DISABLED: Explicitly using watch_list only as per user request
