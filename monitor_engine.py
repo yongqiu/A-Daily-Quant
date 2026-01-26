@@ -108,11 +108,18 @@ def get_realtime_data(targets: List[Dict[str, Any]]) -> Dict[str, Any]:
                     symbol = parts[2]
                     # Map back logic if needed, but here simple symbol matching
                     
+                    price = float(parts[3])
+                    pre_close = float(parts[4])
+                    
+                    # Fix: If current price is 0 (e.g. pre-open, suspended), use pre_close
+                    if price == 0 and pre_close > 0:
+                        price = pre_close
+
                     results[symbol] = {
                         "symbol": symbol,
                         "name": parts[1],
-                        "price": float(parts[3]),
-                        "pre_close": float(parts[4]),
+                        "price": price,
+                        "pre_close": pre_close,
                         "open": float(parts[5]),
                         "high": float(parts[33]),
                         "low": float(parts[34]),
@@ -390,12 +397,16 @@ class MonitorEngine:
                 if existing:
                     existing['type'] = 'holding'
                     existing['asset_type'] = asset_type
+                    existing['cost_price'] = h.get("cost_price", 0)
+                    existing['position_size'] = h.get("position_size", 0)
                 else:
                     new_targets.append({
                         "symbol": h['symbol'],
                         "name": h['name'],
                         "type": "holding",
-                        "asset_type": asset_type
+                        "asset_type": asset_type,
+                        "cost_price": h.get("cost_price", 0),
+                        "position_size": h.get("position_size", 0)
                     })
         except Exception as e:
             print(f"⚠️ Error loading holdings from DB: {e}")
@@ -493,10 +504,18 @@ class MonitorEngine:
         # Pass full targets list to get_realtime_data
         realtime_data = get_realtime_data(self.targets)
         
+        # Pre-fetch daily metrics for all stocks today to show scores in list
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        daily_metrics_map = database.get_all_daily_metrics(today_str)
+        
         results = []
         for target in self.targets:
             symbol = target['symbol']
             data = realtime_data.get(symbol)
+            
+            # Get metrics if available
+            metrics = daily_metrics_map.get(symbol, {})
+            composite_score = metrics.get('composite_score')
             
             if data:
                 check_res = check_strategy(data)
@@ -507,13 +526,17 @@ class MonitorEngine:
                     "name": target['name'],
                     "type": target['type'],
                     "asset_type": target.get('asset_type', 'stock'),
+                    "cost_price": target.get('cost_price', 0),
+                    "position_size": target.get('position_size', 0),
                     "price": data.get('price'),
                     "change_pct": data.get('change_pct'),
                     "volume_ratio": data.get('volume_ratio'),
                     "status": check_res['status'],
                     "alerts": check_res['alerts'],
                     "timestamp": datetime.now().strftime("%H:%M:%S"),
-                    "ai_analysis": self.ai_cache.get(symbol, None) # Attach cached AI result
+                    "ai_analysis": self.ai_cache.get(symbol, None), # Attach cached AI result
+                    # New field for score
+                    "composite_score": composite_score
                 }
                 results.append(item)
             else:
@@ -522,11 +545,15 @@ class MonitorEngine:
                     "symbol": symbol,
                     "name": target['name'],
                     "type": target['type'],
+                    "asset_type": target.get('asset_type', 'stock'), # Missing asset_type in fallback
+                    "cost_price": target.get("cost_price", 0),
+                    "position_size": target.get("position_size", 0),
                     "status": "offline",
                     "alerts": ["无数据"],
                     "price": 0,
                     "change_pct": 0,
-                    "volume_ratio": 0
+                    "volume_ratio": 0,
+                    "composite_score": metrics.get('composite_score')
                 })
                 
         # Sort Rule:

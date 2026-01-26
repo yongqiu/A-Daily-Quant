@@ -220,19 +220,126 @@ def calculate_indicators(df: pd.DataFrame, ma_short: int = 20, ma_long: int = 60
     return df
 
 
+def detect_candlestick_patterns(df: pd.DataFrame) -> Tuple[int, list]:
+    """
+    识别K线形态并返回评分调整 (Bonus/Penalty)
+    """
+    score_adj = 0
+    patterns = []
+    
+    if df is None or len(df) < 3:
+        return 0, []
+
+    # Get data for last 3 days
+    day0 = df.iloc[-1]   # Today
+    day1 = df.iloc[-2]   # Yesterday
+    day2 = df.iloc[-3]   # 2 Days ago
+
+    # Helper for Day 0 properties
+    open0, close0, high0, low0 = day0['open'], day0['close'], day0['high'], day0['low']
+    body0 = abs(close0 - open0)
+    upper_shadow0 = high0 - max(close0, open0)
+    lower_shadow0 = min(close0, open0) - low0
+    
+    # Helper for Day 1 properties
+    open1, close1 = day1['open'], day1['close']
+    
+    # 0. 基础数据校验 (防止一字板导致 body0 为 0 的除法错误)
+    if body0 == 0:
+        body0 = 0.01
+
+    # === 1. 锤子线 (Hammer) - 看多 [+5分] ===
+    # 逻辑: 下影线 >= 实体*2, 上影线很短. 发生在回调或低位.
+    is_hammer = (lower_shadow0 >= 2 * body0) and (upper_shadow0 <= 0.5 * body0)
+    
+    # 简单的趋势/位置过滤: 收盘价回踩 MA20 或 MA60 附近 (或低于 MA20)
+    ma20 = day0.get('ma20')
+    ma60 = day0.get('ma60')
+    
+    # 位置判断: 是否在支撑位附近? (比如 Price <= MA20 * 1.02)
+    is_near_support = False
+    if ma20 and low0 <= ma20 * 1.02:
+        is_near_support = True
+    elif ma60 and low0 <= ma60 * 1.02:
+        is_near_support = True
+        
+    if is_hammer and is_near_support:
+        score_adj += 5
+        patterns.append("✨ 锤子线/金针探底 (+5)")
+
+    # === 2. 射击之星 (Shooting Star) - 看空 [-10分] ===
+    # 逻辑: 上影线 >= 实体*2, 下影线很短. 发生在高位.
+    is_shooting = (upper_shadow0 >= 2 * body0) and (lower_shadow0 <= 0.5 * body0)
+    
+    # 位置判断: 是否在高位? (RSI > 60 或 远离MA20)
+    rsi = day0.get('rsi', 50)
+    is_high_pos = (rsi > 60) or (ma20 and high0 > ma20 * 1.1)
+    
+    if is_shooting and is_high_pos:
+        score_adj -= 10
+        patterns.append("⚠️ 射击之星/墓碑线 (-10)")
+
+    # === 3. 阳包阴 (Bullish Engulfing) - 强烈看多 [+8分] ===
+    # 逻辑: 昨天阴线, 今天阳线. 今天实体 完全包裹 昨天实体.
+    # 宽松定义: Open0 < Close1 (低开) AND Close0 > Open1 (高走覆盖)
+    is_day1_bear = close1 < open1
+    is_day0_bull = close0 > open0
+    
+    if is_day1_bear and is_day0_bull:
+        if (open0 < close1) and (close0 > open1):
+             score_adj += 8
+             patterns.append("🔥 阳包阴/多头吞没 (+8)")
+
+    # === 4. 乌云盖顶 (Dark Cloud Cover) - 看空 [-8分] ===
+    # 逻辑: 昨天阳线, 今天高开低走阴线, 收盘跌破昨日实体中点
+    is_day1_bull = close1 > open1
+    is_day0_bear = close0 < open0
+    midpoint1 = open1 + (close1 - open1) / 2
+    
+    if is_day1_bull and is_day0_bear:
+        if (open0 > close1) and (close0 < midpoint1):
+            score_adj -= 8
+            patterns.append("💀 乌云盖顶 (-8)")
+
+    # === 5. 早晨之星 (Morning Star) - 看多 [+10分] ===
+    # 需要3天: 阴线 -> 十字星/小阴小阳 -> 大阳线
+    # Day 2 (前前日): 阴线
+    open2, close2 = day2['open'], day2['close']
+    is_day2_bear = (close2 < open2) and abs(close2-open2)/open2 > 0.02 # 实体>2%
+    
+    # Day 1 (昨日): 星线 (实体很小)
+    body1 = abs(close1 - open1)
+    is_day1_star = body1/open1 < 0.015 # 实体<1.5%
+    
+    # Day 0 (今日): 阳线, 且收盘价刺入 Day2 实体一半以上
+    is_day0_bull_strong = (close0 > open0) and (close0 > (close2 + open2)/2)
+    
+    if is_day2_bear and is_day1_star and is_day0_bull_strong:
+         score_adj += 10
+         patterns.append("☀️ 早晨之星 (+10)")
+         
+    return score_adj, patterns
+
+
 def get_stock_operation_suggestion(total_score: int, metrics: Dict[str, Any]) -> str:
     """
     根据个股评分给出操作建议
     """
-    close = metrics.get('close', 0)
-    ma20 = metrics.get('ma20', 0)
+    close = metrics.get('close')
+    ma20 = metrics.get('ma20')
+    
+    # Handle missing data
+    if close is None or ma20 is None:
+        is_above_ma20 = False
+    else:
+        is_above_ma20 = close > ma20
     
     if total_score >= 80:
         return "【坚决持有】趋势强烈，可持有或逢低加仓"
     elif total_score >= 65:
         return "【持有】多头趋势中，继续持有"
     elif total_score >= 50:
-        if close > ma20:
+        if is_above_ma20:
              return "【持有/观望】震荡偏多，关注支撑位"
         else:
              return "【观望】震荡偏弱，暂不介入"
@@ -245,121 +352,149 @@ def get_stock_operation_suggestion(total_score: int, metrics: Dict[str, Any]) ->
 def calculate_composite_score(metrics: Dict[str, Any]) -> Tuple[int, str, list]:
     """
     计算综合评分 (0-100分)
-    
-    评分维度：
-    - 趋势 (30分): 均线位置、均线排列
-    - 动量 (25分): MACD、RSI
-    - 超买超卖 (20分): RSI、KDJ、布林带位置
-    - 量价配合 (15分): 成交量确认
-    - 风险 (10分): 距离支撑/压力位
-    
-    Returns:
-        (总分, 评级, 详细得分列表)
     """
     scores = []
     details = []
+    
+    # Helper for safe float retrieval
+    def get_val(key):
+        return metrics.get(key)
     
     # === 趋势得分 (35分) ===
     trend_score = 0
     
     # 价格与MA20关系 (10分)
-    if metrics['close'] > metrics['ma20']:
-        trend_score += 10
-        details.append("✅ 价格在MA20上方 (+10)")
+    close = get_val('close')
+    ma20 = get_val('ma20')
+    
+    if close is not None and ma20 is not None:
+        if close > ma20:
+            trend_score += 10
+            details.append("✅ 价格在MA20上方 (+10)")
+        else:
+            details.append("❌ 价格在MA20下方 (+0)")
     else:
-        details.append("❌ 价格在MA20下方 (+0)")
+        details.append("⚠️ 价格/MA20数据缺失 (+0)")
     
     # 均线排列 (10分)
-    if metrics.get('ma_arrangement') == '多头排列':
+    ma_arrangement = metrics.get('ma_arrangement')
+    if ma_arrangement == '多头排列':
         trend_score += 10
         details.append("✅ 均线多头排列 (+10)")
-    elif metrics.get('ma_arrangement') == '空头排列':
+    elif ma_arrangement == '空头排列':
         details.append("❌ 均线空头排列 (+0)")
     else:
         trend_score += 5
         details.append("⚠️ 均线交织 (+5)")
 
-    # MACD (15分 - Moved here)
-    if metrics['macd_dif'] > metrics['macd_dea']:
-        trend_score += 10
-        details.append("✅ MACD金叉 (+10)")
-    else:
-        details.append("❌ MACD死叉 (+0)")
+    # MACD (15分)
+    macd_dif = get_val('macd_dif')
+    macd_dea = get_val('macd_dea')
+    macd_hist = get_val('macd_hist')
     
-    if metrics['macd_hist'] > 0:
-        trend_score += 5
-        details.append("✅ MACD柱为正 (+5)")
+    if macd_dif is not None and macd_dea is not None:
+        if macd_dif > macd_dea:
+            trend_score += 10
+            details.append("✅ MACD金叉 (+10)")
+        else:
+            details.append("❌ MACD死叉 (+0)")
     else:
-        details.append("❌ MACD柱为负 (+0)")
+        details.append("⚠️ MACD数据缺失 (+0)")
+    
+    if macd_hist is not None:
+        if macd_hist > 0:
+            trend_score += 5
+            details.append("✅ MACD柱为正 (+5)")
+        else:
+            details.append("❌ MACD柱为负 (+0)")
+    else:
+        details.append("⚠️ MACD数据缺失 (+0)")
     
     scores.append(('趋势', trend_score, 35))
     
     # === 动量得分 (25分) ===
     momentum_score = 0
     
-    # MACD (15分 moved to Trend Score to balance)
-    pass
-    
-    # RSI趋势 (15分) - Adjusted for Trend Strategy
-    # 60-75 is the "Sweet Spot" for strong momentum
-    rsi = metrics['rsi']
-    if 60 <= rsi <= 75:
-        momentum_score += 15
-        details.append(f"🔥 RSI主升浪区间({rsi:.1f}) (+15)")
-    elif 50 <= rsi < 60:
-        momentum_score += 10
-        details.append(f"✅ RSI多头区间({rsi:.1f}) (+10)")
-    elif 40 <= rsi < 50:
-        momentum_score += 5
-        details.append(f"⚠️ RSI中性偏弱({rsi:.1f}) (+5)")
-    elif rsi > 80:
-        momentum_score += 0
-        details.append(f"❌ RSI严重超买({rsi:.1f}) (+0)")
+    # RSI趋势 (15分)
+    rsi = get_val('rsi')
+    if rsi is not None:
+        # Extend top range to 80 to catch strong momentum before overbought
+        if 60 <= rsi <= 80:
+            momentum_score += 15
+            if rsi > 75:
+                details.append(f"🔥 RSI强势冲顶({rsi:.1f}) (+15)")
+            else:
+                details.append(f"🔥 RSI主升浪区间({rsi:.1f}) (+15)")
+        elif 50 <= rsi < 60:
+            momentum_score += 10
+            details.append(f"✅ RSI多头区间({rsi:.1f}) (+10)")
+        elif 40 <= rsi < 50:
+            momentum_score += 5
+            details.append(f"⚠️ RSI中性偏弱({rsi:.1f}) (+5)")
+        elif rsi > 80:
+            momentum_score += 0
+            details.append(f"❌ RSI严重超买({rsi:.1f}) (+0)")
+        else:
+            details.append(f"❌ RSI弱势({rsi:.1f}) (+0)")
     else:
-        details.append(f"❌ RSI弱势({rsi:.1f}) (+0)")
+        details.append(f"⚠️ RSI数据缺失 (+0)")
     
     # Feature: Price Structure (10分)
-    # Distance to 120-Day High
-    price_pos = metrics.get('price_vs_high120', 0)
-    if price_pos >= 0.95:
-        momentum_score += 10
-        details.append(f"🔥 逼近前高({price_pos:.2%}) (+10)")
-    elif price_pos >= 0.85:
-        momentum_score += 5
-        details.append(f"✅ 接近高点({price_pos:.2%}) (+5)")
+    price_pos = get_val('price_vs_high120')
+    if price_pos is not None:
+        if price_pos >= 0.95:
+            momentum_score += 10
+            details.append(f"🔥 逼近前高({price_pos:.2%}) (+10)")
+        elif price_pos >= 0.85:
+            momentum_score += 5
+            details.append(f"✅ 接近高点({price_pos:.2%}) (+5)")
+        else:
+            details.append(f"⚠️ 距前高较远({price_pos:.2%}) (+0)")
     else:
-        details.append(f"⚠️ 距前高较远({price_pos:.2%}) (+0)")
+        details.append(f"⚠️ 价格结构数据缺失 (+0)")
 
     scores.append(('动量', momentum_score, 25))
     
     # === 超买超卖得分 (20分) ===
     overbought_score = 0
     
-    # RSI Extreme check (Keep basic safety)
-    if rsi < 80:
-        overbought_score += 8
-        details.append("✅ RSI安全范围 (+8)")
+    # RSI Extreme check
+    if rsi is not None:
+        if rsi < 80:
+            overbought_score += 8
+            details.append("✅ RSI安全范围 (+8)")
+        else:
+            details.append("⚠️ RSI超买警告 (+0)")
     else:
-        details.append("⚠️ RSI超买警告 (+0)")
+        details.append("⚠️ RSI数据缺失 (+0)")
     
     # KDJ (6分)
-    kdj_k = metrics['kdj_k']
-    if 20 <= kdj_k <= 80:
-        overbought_score += 6
-        details.append("✅ KDJ正常区间 (+6)")
+    kdj_k = get_val('kdj_k')
+    if kdj_k is not None:
+        if 20 <= kdj_k <= 80:
+            overbought_score += 6
+            details.append("✅ KDJ正常区间 (+6)")
+        else:
+            details.append("⚠️ KDJ极端区间 (+0)")
     else:
-        details.append("⚠️ KDJ极端区间 (+0)")
+        details.append("⚠️ KDJ数据缺失 (+0)")
     
     # 布林带位置 (6分)
-    boll_pos = metrics.get('boll_position', 50)
-    if 20 <= boll_pos <= 80:
-        overbought_score += 6
-        details.append("✅ 布林带中轨附近 (+6)")
-    elif boll_pos > 80:
-        details.append("⚠️ 接近布林上轨 (+0)")
+    boll_pos = get_val('boll_position')
+    if boll_pos is not None:
+        if 20 <= boll_pos <= 80:
+            overbought_score += 6
+            details.append("✅ 布林带中轨附近 (+6)")
+        elif boll_pos > 80:
+            details.append("⚠️ 接近布林上轨 (+0)")
+        else:
+            overbought_score += 3
+            details.append("⚠️ 接近布林下轨 (+3)")
     else:
+        # Default to safe if unknown, but give less points?
+        # Let's give neutral points (3) to avoid penalizing new stocks too much
         overbought_score += 3
-        details.append("⚠️ 接近布林下轨 (+3)")
+        details.append("⚠️ 布林带数据缺失 (+3)")
     
     scores.append(('超买超卖', overbought_score, 20))
     
@@ -387,41 +522,60 @@ def calculate_composite_score(metrics: Dict[str, Any]) -> Tuple[int, str, list]:
     # === 风险得分 (10分) ===
     risk_score = 0
     
-    # ATR Volatility Check (New Feature)
-    atr_pct = metrics.get('atr_pct', 0)
-    if 2.0 <= atr_pct <= 8.0:
-        risk_score += 5
-        details.append(f"✅ 波动率适中({atr_pct:.1f}%) (+5)")
-    elif atr_pct < 2.0:
-        details.append(f"⚠️ 波动率过低({atr_pct:.1f}%) (+0)")
+    # ATR Volatility Check
+    atr_pct = get_val('atr_pct')
+    if atr_pct is not None:
+        if 2.0 <= atr_pct <= 8.0:
+            risk_score += 5
+            details.append(f"✅ 波动率适中({atr_pct:.1f}%) (+5)")
+        elif atr_pct < 2.0:
+            details.append(f"⚠️ 波动率过低({atr_pct:.1f}%) (+0)")
+        else:
+            details.append(f"⚠️ 波动率过高({atr_pct:.1f}%) (+0)")
     else:
-        details.append(f"⚠️ 波动率过高({atr_pct:.1f}%) (+0)")
+        details.append(f"⚠️ 波动率数据缺失 (+0)")
         
     # 距离MA20的风险
-    distance = abs(metrics['distance_from_ma20'])
-    if distance <= 5:
-        risk_score += 3
-        details.append("✅ 距MA20较近(+3)")
-    elif distance <= 10:
-        risk_score += 1
-        details.append("⚠️ 距MA20适中(+1)")
+    dist_ma20 = get_val('distance_from_ma20')
+    if dist_ma20 is not None:
+        distance = abs(dist_ma20)
+        if distance <= 5:
+            risk_score += 3
+            details.append("✅ 距MA20较近(+3)")
+        elif distance <= 10:
+            risk_score += 1
+            details.append("⚠️ 距MA20适中(+1)")
+        else:
+            details.append("❌ 距MA20远(+0)")
     else:
-        details.append("❌ 距MA20远(+0)")
+         details.append("⚠️ MA20乖离率缺失 (+0)")
     
     # 距离支撑/压力位
-    dist_support = metrics.get('distance_to_support', 5)
-    dist_resistance = metrics.get('distance_to_resistance', 5)
+    dist_support = get_val('distance_to_support')
+    dist_resistance = get_val('distance_to_resistance')
     
-    if dist_support > 3 and dist_resistance > 3:
+    # Default to "safe" if missing (e.g. 5%)
+    d_sup = dist_support if dist_support is not None else 5
+    d_res = dist_resistance if dist_resistance is not None else 5
+    
+    if d_sup > 3 and d_res > 3:
         risk_score += 5
         details.append("✅ 远离支撑压力位 (+5)")
-    elif dist_support <= 3:
+    elif d_sup <= 3:
         risk_score += 3
         details.append("⚠️ 接近支撑位 (+3)")
     else:
         details.append("⚠️ 接近压力位 (+0)")
     
     scores.append(('风险控制', risk_score, 10))
+    
+    # === K线形态修正 (Bonus/Penalty) ===
+    pat_score = metrics.get('pattern_score', 0)
+    pat_details = metrics.get('pattern_details', [])
+    
+    if pat_score != 0 or pat_details:
+         scores.append(('K线形态', pat_score, 0)) # 权重0表示额外加分项
+         details.extend(pat_details)
     
     # === 计算总分和评级 ===
     total_score = sum(s[1] for s in scores)
@@ -449,52 +603,65 @@ def get_latest_metrics(df: pd.DataFrame, cost_price: float = None) -> Dict[str, 
     prev = df.iloc[-2] if len(df) > 1 else latest
     
     # 基础信号判断
-    trend_signal = "看涨" if latest['close'] > latest['ma20'] else "看跌"
-    macd_signal = "看涨" if latest['macd_dif'] > latest['macd_dea'] else "看跌"
-    volume_signal = "放量" if latest['volume_change_pct'] > 0 else "缩量"
+    # Helper to safe check >
+    def safe_gt(a, b):
+        if pd.isna(a) or pd.isna(b): return False
+        try:
+            return a > b
+        except:
+            return False
+
+    trend_signal = "看涨" if safe_gt(latest['close'], latest['ma20']) else "看跌"
+    macd_signal = "看涨" if safe_gt(latest['macd_dif'], latest['macd_dea']) else "看跌"
+    volume_signal = "放量" if safe_gt(latest['volume_change_pct'], 0) else "缩量"
     
     # RSI信号
     rsi = latest['rsi']
-    if rsi > 70:
+    if safe_gt(rsi, 70):
         rsi_signal = "超买"
-    elif rsi < 30:
+    elif safe_gt(30, rsi):
         rsi_signal = "超卖"
     else:
         rsi_signal = "中性"
     
     # KDJ信号
-    kdj_signal = "金叉" if latest['kdj_k'] > latest['kdj_d'] else "死叉"
+    kdj_signal = "金叉" if safe_gt(latest['kdj_k'], latest['kdj_d']) else "死叉"
     
     # KDJ超买超卖
-    if latest['kdj_k'] > 80:
+    if safe_gt(latest['kdj_k'], 80):
         kdj_zone = "超买区"
-    elif latest['kdj_k'] < 20:
+    elif safe_gt(20, latest['kdj_k']):
         kdj_zone = "超卖区"
     else:
         kdj_zone = "正常区"
     
     # 量价确认
-    volume_confirmation = "有效" if latest['volume_ratio'] > 1.2 else "无效"
+    volume_confirmation = "有效" if safe_gt(latest['volume_ratio'], 1.2) else "无效"
     
     # 均线排列
-    if latest['ma_bullish']:
+    if latest.get('ma_bullish') == True:
         ma_arrangement = "多头排列"
-    elif latest['ma_bearish']:
+    elif latest.get('ma_bearish') == True:
         ma_arrangement = "空头排列"
     else:
         ma_arrangement = "交织"
     
     # 布林带信号
     boll_pos = latest['boll_position']
-    if boll_pos > 80:
+    if safe_gt(boll_pos, 80):
         boll_signal = "接近上轨"
-    elif boll_pos < 20:
+    elif safe_gt(20, boll_pos):
         boll_signal = "接近下轨"
     else:
         boll_signal = "中轨附近"
     
     # ATR 止损建议
-    stop_loss_price = latest['close'] - (2 * latest['atr'])
+    atr_val = latest.get('atr')
+    close_val = latest.get('close')
+    if atr_val is not None and close_val is not None and not pd.isna(atr_val) and not pd.isna(close_val):
+         stop_loss_price = close_val - (2 * atr_val)
+    else:
+         stop_loss_price = None
     
     metrics = {
         'date': latest['date'].strftime('%Y-%m-%d'),
@@ -576,6 +743,11 @@ def get_latest_metrics(df: pd.DataFrame, cost_price: float = None) -> Dict[str, 
         metrics['cost_price'] = cost_price
         metrics['profit_loss_pct'] = safe_round(profit_loss_pct, 2)
     
+    # K线形态识别
+    pat_score, pat_details = detect_candlestick_patterns(df)
+    metrics['pattern_score'] = pat_score
+    metrics['pattern_details'] = pat_details
+
     # 计算综合评分
     total_score, rating, scores, details = calculate_composite_score(metrics)
     metrics['composite_score'] = total_score

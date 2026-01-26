@@ -1,0 +1,101 @@
+/* ========================================
+   UI/UX CSS Classes Quick Reference
+   ======================================== */
+
+/* === ACCESSIBILITY === */
+.skip-to-content        /* Skip navigation link for keyboard users */
+.sr-only               /* Screen reader only content */
+
+/* === CURSOR === */
+.cursor-pointer        /* Pointer cursor on interactive elements */
+/* Applied automatically to: button, a, [role="button"], .clickable, .glass-card, .interactive-card, .stock-row, .tab-button, .filter-chip */
+
+/* === INTERACTION === */
+.button-loading        /* Loading state with spinner */
+.button-interactive    /* Enhanced button with hover/active effects */
+.hover-lift            /* Card lifts on hover (translateY -2px) */
+
+/* === SPACING === */
+.spacing-xs            { padding: 4px; }
+.spacing-sm            { padding: 8px; }
+.spacing-md            { padding: 16px; }
+.spacing-lg            { padding: 24px; }
+.spacing-xl            { padding: 32px; }
+
+/* === TYPOGRAPHY === */
+.text-xs    { font-size: 0.75rem; line-height: 1rem; }
+.text-sm    { font-size: 0.875rem; line-height: 1.25rem; }
+.text-base  { font-size: 1rem; line-height: 1.5rem; }
+.text-lg    { font-size: 1.125rem; line-height: 1.75rem; }
+.text-xl    { font-size: 1.25rem; line-height: 1.75rem; }
+.text-2xl   { font-size: 1.5rem; line-height: 2rem; }
+
+/* === TEXT COLORS (WCAG AA Compliant) === */
+.text-high-contrast     /* #F9FAFB - 15.5:1 ratio */
+.text-medium-contrast   /* #D1D5DB - 11.2:1 ratio */
+.text-low-contrast      /* #9CA3AF - 6.5:1 ratio (minimum AA) */
+.text-muted-improved    /* #6B7280 - 4.8:1 ratio (WCAG AA) */
+
+/* === Z-INDEX === */
+.z-base           { z-index: 1; }
+.z-dropdown       { z-index: 10; }
+.z-sticky         { z-index: 20; }
+.z-fixed          { z-index: 30; }
+.z-modal-backdrop { z-index: 40; }
+.z-modal          { z-index: 50; }
+.z-tooltip        { z-index: 60; }
+.z-notification   { z-index: 70; }
+
+/* === CHART COLORS === */
+.chart-up    /* Teal #26A69A - high contrast */
+.chart-down  /* Red #EF5350 - high contrast */
+
+/* === SPARKLINES === */
+.sparkline         /* Inline chart container */
+.sparkline-up      /* Teal stroke + fill */
+.sparkline-down    /* Red stroke + fill */
+
+/* === PROGRESS BAR === */
+.progress-bar       /* Container with gray background */
+.progress-bar-fill  /* Blue gradient fill, animates width */
+
+/* === ERROR & SUCCESS === */
+.input-error        /* Red border + shadow ring */
+.input-success      /* Green border + shadow ring */
+.error-message      /* Red text with warning icon */
+.success-message    /* Green text */
+
+/* === LOADING === */
+.skeleton           /* Animated gradient loading placeholder */
+.pulse-loading      /* Opacity pulse animation */
+
+/* === MODAL === */
+.modal-backdrop     /* Dark background with blur */
+.modal-content      /* Centered modal container */
+
+/* === TABLE === */
+.table-responsive   /* Horizontal scroll wrapper */
+.table-container    /* Styled table with sticky header */
+
+/* === TOAST NOTIFICATIONS === */
+.toast              /* Base toast styles */
+.toast-success      /* Teal background */
+.toast-error        /* Red background */
+.toast-info         /* Blue background */
+
+/* === ANIMATIONS (Optimized Timing) === */
+.animate-fade-in        /* 0.2s ease-out */
+.animate-fade-in-up     /* 0.3s ease-out */
+.animate-fade-in-scale  /* 0.2s ease-out */
+.data-pulse            /* 0.3s ease-in-out */
+.number-bounce         /* 0.2s cubic-bezier */
+
+/* === RESPONSIVE BREAKPOINTS === */
+/* Mobile: < 768px */
+/* Tablet: 768px - 1024px */
+/* Desktop: > 1024px */
+
+/* === REDUCED MOTION === */
+/* All animations disabled when:
+   @media (prefers-reduced-motion: reduce)
+*/

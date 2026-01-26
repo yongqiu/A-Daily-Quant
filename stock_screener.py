@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 
 from data_fetcher import fetch_stock_data, calculate_start_date, fetch_sector_data, fetch_stock_news
+from data_fetcher_tx import get_market_snapshot_tencent
 from indicator_calc import calculate_indicators, get_latest_metrics
 import database
 
@@ -115,13 +116,42 @@ def get_market_snapshot() -> pd.DataFrame:
     Get real-time snapshot of all A-share stocks
     """
     print("🌍 Fetching market snapshot... (This may take a moment)")
+    
+    # Priority: Try Tencent Interface First (More Stable)
     try:
-        # Fetch spot data for all A-shares
-        df = ak.stock_zh_a_spot_em()
-        
+        df = get_market_snapshot_tencent()
+        if not df.empty:
+            return df
+        print("⚠️ Tencent fetch returned empty, falling back to EM...")
+    except Exception as e:
+        print(f"⚠️ Tencent fetch failed: {e}, falling back to EM...")
+
+    # Fallback: AkShare EM Interface
+    max_retries = 3
+    df = None
+    
+    for attempt in range(max_retries):
+        try:
+            if attempt > 0:
+                print(f"🔄 Retry attempt {attempt + 1}/{max_retries}...")
+                
+            # Fetch spot data for all A-shares
+            df = ak.stock_zh_a_spot_em()
+            break # Success, exit loop
+            
+        except Exception as e:
+            if attempt < max_retries - 1:
+                print(f"⚠️ Market snapshot fetch failed: {e}. Retrying in 2s...")
+                time.sleep(2)
+            else:
+                print(f"❌ Error fetching market snapshot: {e}")
+                return pd.DataFrame()
+
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    try:
         # Renaissance mapping for easier handling
-        # Columns usually: 序号, 代码, 名称, 最新价, 涨跌幅, 涨跌额, 成交量, 成交额, 振幅, 最高, 最低, 今开, 昨收, 量比, 换手率, 市盈率-动态, 市净率
-        # 注意：akshare返回的列名可能包含"板块"
         column_map = {
             '代码': 'symbol',
             '名称': 'name',
@@ -133,13 +163,8 @@ def get_market_snapshot() -> pd.DataFrame:
             '换手率': 'turnover_rate',
             '市盈率-动态': 'pe_ttm',
             '流通市值': 'mcap_float',
-            '所属板块': 'sector'  # AkShare spot data often includes this, but if not we proceed
+            '所属板块': 'sector'
         }
-        # Handle potential column name variations if "所属板块" isn't present by default, we can't strict map it
-        # But stock_zh_a_spot_em usually doesn't have '所属板块' directly.
-        # Sector filtering in Rough Screen might need a separate mapping or rely on 'bk' mapping if available.
-        # Since getting specific sector for each stock is expensive, we will implement optimized "Sector Beta" logic:
-        # We will NOT filter by sector column here if it doesn't exist.
         
         df = df.rename(columns=column_map)
         
@@ -151,7 +176,7 @@ def get_market_snapshot() -> pd.DataFrame:
                 
         return df
     except Exception as e:
-        print(f"❌ Error fetching market snapshot: {e}")
+        print(f"❌ Error processing market snapshot columns: {e}")
         return pd.DataFrame()
 
 def run_rough_screen(df: pd.DataFrame, criteria: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -257,6 +282,11 @@ def analyze_candidate(candidate: Dict[str, Any], config: Dict[str, Any]) -> Dict
     # Merge basic info
     tech_data['symbol'] = symbol
     tech_data['name'] = candidate['name']
+
+    # Merge rough screen metrics (turnover, pe, mcap)
+    for key in ['turnover_rate', 'pe_ttm', 'mcap_float', 'volume_ratio']:
+        if key in candidate and key not in tech_data:
+            tech_data[key] = candidate[key]
     
     # Fetch News (Optimization: AI Prompting)
     # We'll attach news to the tech_data so LLM can read it

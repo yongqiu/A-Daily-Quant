@@ -131,6 +131,51 @@ def fetch_future_data(symbol: str, start_date: str) -> Optional[pd.DataFrame]:
         return None
 
 
+def fetch_stock_data_tx_fallback(symbol: str, start_date: str, end_date: str) -> Optional[pd.DataFrame]:
+    """
+    Try fetching from Tencent (TX) as primary source for A-share stocks.
+    TX requires prefix (sz/sh).
+    """
+    if symbol.startswith('6'):
+        tx_symbol = f"sh{symbol}"
+    elif symbol.startswith('0') or symbol.startswith('3'):
+        tx_symbol = f"sz{symbol}"
+    elif symbol.startswith('4') or symbol.startswith('8'):
+        tx_symbol = f"bj{symbol}"
+    else:
+        return None # Unsure how to map, fallback to EM
+        
+    try:
+        # adjust='qfq' is supported by akshare for tx
+        df = ak.stock_zh_a_hist_tx(symbol=tx_symbol, start_date=start_date, end_date=end_date, adjust="qfq")
+        if df is not None and not df.empty:
+            # TX returns: date, open, close, high, low, amount(actually volume in hands)
+            # We need to map 'amount' -> 'volume'
+            # And potentially approximate 'amount'(money) if needed
+            df = df.rename(columns={'amount': 'volume'})
+            
+            # Approximate Turnover Amount: Close * Volume * 100 (assuming 1 hand = 100 shares)
+            # This is rough but sufficient for volume ratio calc if money amount is not critical
+            # Most indicators use Volume, not Money Amount.
+            df['amount'] = df['close'] * df['volume'] * 100
+            
+            # Ensure columns exist
+            for col in ['date', 'open', 'close', 'high', 'low', 'volume', 'amount']:
+                if col not in df.columns:
+                    # 'date' might be index or named differently?
+                    # Verified in test: columns are ['date', 'open', 'close', 'high', 'low', 'amount']
+                    pass
+            
+            # Filter 0s
+            if 'close' in df.columns:
+                 df = df[df['close'] > 0]
+                 
+            return df
+    except Exception as e:
+        # Quiet fail to fallback
+        return None
+    return None
+
 def fetch_stock_data(symbol: str, start_date: str, is_index: bool = False) -> Optional[pd.DataFrame]:
     """
     Fetch historical stock data from AkShare
@@ -144,42 +189,90 @@ def fetch_stock_data(symbol: str, start_date: str, is_index: bool = False) -> Op
         DataFrame with columns: date, open, close, high, low, volume
         Returns None if fetch fails
     """
-    try:
-        if is_index:
-            # Fetch index data (like 沪深300)
-            df = ak.index_zh_a_hist(symbol=symbol, period="daily", start_date=start_date)
-        elif symbol.startswith('51') or symbol.startswith('159'):
-            # ETF codes (51开头或159开头) use ETF-specific interface
-            df = ak.fund_etf_hist_em(symbol=symbol, period="daily", start_date=start_date, end_date=datetime.now().strftime('%Y%m%d'))
-        else:
-            # Fetch individual stock data with forward adjustment (qfq)
-            df = ak.stock_zh_a_hist(symbol=symbol, period="daily", start_date=start_date, adjust="qfq")
-        
-        if df is None or df.empty:
-            print(f"⚠️  No data returned for {symbol}")
-            return None
-        
-        # Standardize column names
-        df = df.rename(columns={
-            '日期': 'date',
-            '开盘': 'open',
-            '收盘': 'close',
-            '最高': 'high',
-            '最低': 'low',
-            '成交量': 'volume',
-            '成交额': 'amount'
-        })
-        
-        # Ensure date is datetime type
-        df['date'] = pd.to_datetime(df['date'])
-        df = df.sort_values('date').reset_index(drop=True)
-        
-        print(f"✅ Fetched {len(df)} days of data for {symbol}")
-        return df
-        
-    except Exception as e:
-        print(f"❌ Error fetching data for {symbol}: {str(e)}")
-        return None
+    max_retries = 3
+    base_delay = 2
+    
+    # Determine the appropriate end_date
+    now = datetime.now()
+    # If before 09:15 (pre-open call auction), use yesterday as end_date
+    # to avoid fetching potential phantom candles or "today's" data which isn't valid yet.
+    if now.time() < datetime.strptime("09:15", "%H:%M").time():
+        end_date = (now - timedelta(days=1)).strftime('%Y%m%d')
+    else:
+        end_date = now.strftime('%Y%m%d')
+
+    for attempt in range(max_retries):
+        try:
+            df = None
+            
+            # 1. Special Handling for Stocks (Dual Source)
+            if not is_index and not (symbol.startswith('51') or symbol.startswith('159')):
+                # Try Tencent First (Stable)
+                df = fetch_stock_data_tx_fallback(symbol, start_date, end_date)
+                if df is not None:
+                     pass # Got it from TX
+                else:
+                     # Fallback to EM
+                     # Only pass end_date if function signature supports it.
+                     # Standard ak.stock_zh_a_hist accepts end_date
+                     df = ak.stock_zh_a_hist(symbol=symbol, period="daily", start_date=start_date, end_date=end_date, adjust="qfq")
+
+            elif is_index:
+                # Fetch index data (like 沪深300)
+                df = ak.index_zh_a_hist(symbol=symbol, period="daily", start_date=start_date, end_date=end_date)
+            elif symbol.startswith('51') or symbol.startswith('159'):
+                # ETF codes (51开头或159开头) use ETF-specific interface
+                # Wait end_date slightly? No, em interface handles it.
+                df = ak.fund_etf_hist_em(symbol=symbol, period="daily", start_date=start_date, end_date=end_date)
+            
+            if df is None or df.empty:
+                # Sometimes API returns empty for valid stocks if network glitches or start_date issue
+                # But usually it's just empty. We don't retry on empty unless we suspect connection.
+                # However, connection error usually raises Exception.
+                print(f"⚠️  No data returned for {symbol} (Attempt {attempt+1})")
+                if attempt < max_retries - 1:
+                     time.sleep(base_delay * (attempt + 1))
+                     continue
+                return None
+            
+            # Standardize column names
+            df = df.rename(columns={
+                '日期': 'date',
+                '开盘': 'open',
+                '收盘': 'close',
+                '最高': 'high',
+                '最低': 'low',
+                '成交量': 'volume',
+                '成交额': 'amount'
+            })
+            
+            # Ensure date is datetime type
+            df['date'] = pd.to_datetime(df['date'])
+            
+            # Filter out invalid rows where close price is 0 (e.g. data errors or incomplete day)
+            if 'close' in df.columns:
+                df = df[df['close'] > 0]
+                
+            df = df.sort_values('date').reset_index(drop=True)
+            
+            print(f"✅ Fetched {len(df)} days of data for {symbol}")
+            return df
+            
+        except Exception as e:
+            error_str = str(e)
+            # Check for connection-related errors to retry
+            is_conn_error = 'Connection' in error_str or 'RemoteDisconnected' in error_str or 'timeout' in error_str.lower()
+            
+            if is_conn_error and attempt < max_retries - 1:
+                wait_time = base_delay * (2 ** attempt) # Exponential backoff: 2s, 4s, 8s
+                print(f"⚠️ Connection error for {symbol}: {e}. Retrying in {wait_time}s...")
+                time.sleep(wait_time)
+                continue
+            
+            if attempt == max_retries - 1:
+                print(f"❌ Error fetching data for {symbol}: {str(e)}")
+                return None
+    return None
 
 
 def fetch_data_dispatcher(symbol: str, asset_type: str, start_date: str) -> Optional[pd.DataFrame]:

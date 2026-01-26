@@ -8,6 +8,15 @@ import argparse
 import sys
 from datetime import datetime
 from typing import List, Dict, Any
+
+# Clear proxy environments to prevent connection issues with akshare
+for env_var in ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'ALL_PROXY', 'all_proxy']:
+    if env_var in os.environ:
+        print(f"⚠️ Clearing proxy environment variable: {env_var}")
+        os.environ.pop(env_var)
+
+# Force no_proxy to ignore any system level proxies
+os.environ['no_proxy'] = '*'
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from data_fetcher import fetch_stock_data, calculate_start_date
@@ -332,22 +341,20 @@ def process_candidates(config: Dict[str, Any], api_config: Dict[str, Any], date_
                     'cost_price': None # No cost price for potential buys
                 }
                 
-                # Generate AI Analysis for picked stock
-                print(f"🤖 Generating analysis for picked stock: {stock_info['name']}...")
-                try:
-                    llm_analysis = generate_analysis(
-                        stock_info=stock_info,
-                        tech_data=tech_data,
-                        api_config=api_config,
-                        analysis_type="candidate"
-                    )
-                except Exception as e:
-                    llm_analysis = f"AI分析失败 ({str(e)})"
+                # Skip AI Analysis by default for selection list
+                # Optimization: Only generate if user clicks detail (handled by ScreenerView.vue calling /analyze)
+                print(f"🤖 Skipping AI analysis for {stock_info['name']} (Deferred to click)...")
                 
-                # Format Detail Section (Prepare full report first)
-                formatted_report = format_stock_section(stock_info, tech_data, llm_analysis)
+                # We still generate the technical section but without the heavy AI text
+                # We can put a placeholder or basic technical summary
+                
+                # Generate a purely technical report first
+                technical_summary = "__AI分析等待生成__\n\n*(请点击详情页 '生成最新分析' 按钮以获取完整AI解读)*"
+                
+                # Format Detail Section (Prepare full report with placeholder)
+                formatted_report = format_stock_section(stock_info, tech_data, technical_summary)
 
-                # Save to database (Save FULL report including metrics)
+                # Save to database (Save report with metrics but placeholder AI text)
                 try:
                     selection_data = {
                         'symbol': stock_info['symbol'],
@@ -355,7 +362,7 @@ def process_candidates(config: Dict[str, Any], api_config: Dict[str, Any], date_
                         'close_price': tech_data['close'],
                         'volume_ratio': tech_data['volume_ratio'],
                         'composite_score': tech_data.get('composite_score', 0),
-                        'ai_analysis': formatted_report # 🔥 关键修改：存入完整的格式化报告
+                        'ai_analysis': formatted_report # Save the technical report
                     }
                     database.save_daily_selection(date_str, selection_data)
                 except Exception as e:

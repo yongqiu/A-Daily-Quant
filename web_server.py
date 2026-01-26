@@ -4,7 +4,7 @@ Exposes API for frontend and runs background monitoring tasks.
 """
 from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
 from fastapi.templating import Jinja2Templates
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import uvicorn
@@ -16,11 +16,24 @@ import os
 import subprocess
 import re
 import sys
+import json
 from collections import deque
+from pathlib import Path
 from typing import Optional
+
+# Clear proxy environments to prevent connection issues with akshare
+for env_var in ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'ALL_PROXY', 'all_proxy']:
+    if env_var in os.environ:
+        print(f"⚠️ Clearing proxy environment variable: {env_var}")
+        os.environ.pop(env_var)
+
+# Force no_proxy to ignore any system level proxies
+os.environ['no_proxy'] = '*'
 
 from monitor_engine import MonitorEngine
 from data_fetcher import fetch_data_dispatcher, calculate_start_date, fetch_stock_info
+from indicator_calc import calculate_indicators, get_latest_metrics # Import needed for score API
+from monitor_engine import get_realtime_data # Import needed for score API
 import database  # Add database import
 
 app = FastAPI(title="A-Share Strategy Monitor")
@@ -95,25 +108,34 @@ async def startup_event():
     asyncio.create_task(market_data_loop())
     print("📋 监控系统已就绪，等待用户手动开启...")
 
-@app.get("/", response_class=HTMLResponse)
-async def read_root(request: Request):
-    """Render the main dashboard"""
-    return templates.TemplateResponse("index.html", {
-        "request": request,
-        "title": "A-Share Monitor"
-    })
-
-@app.get("/strategies", response_class=HTMLResponse)
-async def strategy_config_page(request: Request):
-    """Render the strategy configuration page"""
-    return templates.TemplateResponse("strategies.html", {
-        "request": request,
-        "title": "策略配置中心"
-    })
+# 检查是否使用 Vue 前端 (构建后的静态文件)
+VUE_FRONTEND_PATH = Path(__file__).parent / "frontend" / "dist"
+USE_VUE_FRONTEND = VUE_FRONTEND_PATH.exists() and (VUE_FRONTEND_PATH / "index.html").exists()
 
 @app.get("/api/status")
 async def get_status():
     """API called by frontend poller"""
+    # If monitoring is not active and stocks list is empty, load from database
+    if not market_state["is_monitoring"] and not market_state.get("stocks"):
+        monitor_engine.refresh_targets()
+        # Get static stock info from database holdings
+        holdings = database.get_all_holdings()
+        if holdings:
+            market_state["stocks"] = [
+                {
+                    "symbol": h["symbol"],
+                    "name": h["name"],
+                    "price": 0,
+                    "change_pct": 0,
+                    "type": "holding",
+                    "asset_type": h.get("asset_type", "stock"),
+                    "cost_price": h.get("cost_price", 0),
+                    "position_size": h.get("position_size", 0),
+                    "volume_ratio": 0,
+                    "status": "等待监控开启"
+                }
+                for h in holdings
+            ]
     # Return cached state immediately (non-blocking)
     return market_state
 
@@ -191,6 +213,7 @@ async def update_holding(symbol: str, holding: HoldingUpdate):
         position_size=holding.position_size
     )
     if success:
+        monitor_engine.refresh_targets()
         return {"status": "success", "message": f"Updated {symbol}"}
     else:
         raise HTTPException(status_code=400, detail="Failed to update holding")
@@ -208,8 +231,26 @@ async def delete_holding(symbol: str):
 @app.get("/api/selections")
 async def get_selections(date: str = None):
     """Get daily selections from database"""
+    print(f"📡 API /api/selections called with date='{date}' (Type: {type(date)})")
+    
     # If date is not provided, database layer handles retrieving the latest
-    return database.get_daily_selections(date)
+    selections = database.get_daily_selections(date)
+    print(f"📦 Found {len(selections)} selections")
+
+    # Get available dates
+    try:
+        conn = database.get_connection()
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT DISTINCT selection_date FROM daily_selections ORDER BY selection_date DESC LIMIT 30")
+            dates = [row['selection_date'].strftime('%Y-%m-%d') for row in cursor.fetchall()]
+    except Exception as e:
+        print(f"❌ Error getting available dates: {e}")
+        dates = []
+
+    return {
+        "selections": selections,
+        "available_dates": dates
+    }
 
 @app.post("/api/monitor/toggle")
 async def toggle_monitor():
@@ -480,6 +521,334 @@ async def get_report_logs():
 single_analysis_status = {}  # {symbol: {"status": "idle"|"running"|"success"|"error", "message": "", "result": ""}}
 realtime_analysis_status = {} # {symbol: {"status": "idle"|"running"|"success"|"error", "message": "", "result": ""}}
 
+@app.post("/api/analyze/{symbol}/score")
+async def calculate_stock_score(symbol: str):
+    """
+    Phase 1: Calculate metrics and score ONLY (No AI analysis).
+    Saves to 'daily_metrics' table.
+    """
+    try:
+        # 1. Get info
+        holdings = database.get_all_holdings()
+        stock_info = next((h for h in holdings if h['symbol'] == symbol), None)
+        if not stock_info:
+            # Try fetch basic info if not in holdings
+            basic_info = fetch_stock_info(symbol)
+            if basic_info:
+                 stock_info = {
+                     'symbol': symbol,
+                     'name': basic_info.get('name', symbol),
+                     'asset_type': 'stock',
+                     'cost_price': None
+                 }
+            else:
+                return JSONResponse(status_code=404, content={"message": f"未找到股票 {symbol} 的信息"})
+
+        # 2. Fetch History & Calculate Indicators
+        start_date = calculate_start_date(120)
+        asset_type = stock_info.get('asset_type', 'stock')
+        df = fetch_data_dispatcher(symbol, asset_type, start_date)
+        
+        if df is None or df.empty:
+            return JSONResponse(status_code=500, content={"message": "无法获取历史数据"})
+            
+        df = calculate_indicators(df)
+        
+        # 3. Get Realtime Data to make it up-to-date
+        rt_dict = get_realtime_data([stock_info])
+        rt_data = rt_dict.get(symbol)
+        
+        # 4. Merge Data (Realtime overrides history for 'close' to get accurate latest score)
+        latest = get_latest_metrics(df, float(stock_info.get('cost_price') or 0))
+        
+        if rt_data and rt_data.get('price'):
+             latest['close'] = rt_data.get('price')
+             latest['realtime_price'] = rt_data.get('price')
+             latest['change_pct_today'] = rt_data.get('change_pct')
+             # Note: Recalculating MA/RSI with realtime price is complex without full timeseries update,
+             # so we usually accept 'latest close' means 'yesterday close' + 'current price' displayed
+             # But for storing metrics, we might want to store the snapshot.
+             
+        # 5. Save to daily_metrics
+        today = datetime.now().strftime('%Y-%m-%d')
+        latest['symbol'] = symbol
+        latest['change_pct'] = latest.get('change_pct_today', 0)
+        # Ensure 'price' key exists for database save (mapped from 'close')
+        latest['price'] = latest.get('close', 0)
+        
+        # Process pattern list to string
+        pattern_list = latest.get('pattern_details', [])
+        latest['pattern_flags'] = ",".join(pattern_list) if pattern_list else ""
+        
+        success = database.save_daily_metrics(today, latest)
+        
+        if success:
+            return {
+                "status": "success",
+                "message": "指标计算完成，已存入据库",
+                "data": latest
+            }
+        else:
+             return JSONResponse(status_code=500, content={"message": "数据库保存失败"})
+             
+    except Exception as e:
+        print(f"Calculate Score Error: {e}")
+        return JSONResponse(status_code=500, content={"message": f"计算失败: {str(e)}"})
+
+@app.get("/api/analyze/{symbol}/metrics")
+async def get_stock_metrics(symbol: str, date: str = None):
+    """Get calculated metrics score from database"""
+    if not date:
+        date = datetime.now().strftime('%Y-%m-%d')
+    
+    metrics = database.get_daily_metrics(symbol, date)
+    if metrics:
+        return {
+            "status": "success",
+            "data": metrics
+        }
+    else:
+        # Try getting yesterday's if today's not found? Or just return not found
+        # For better UX, maybe checking if there is any recent metric?
+        # But specifically we want "today's metrics" if we want to show current status.
+        return {
+            "status": "not_found",
+            "message": "No metrics found for this date"
+        }
+
+@app.get("/api/analyze/{symbol}/report/stream")
+async def analyze_stock_report_stream(symbol: str, mode: str = "multi_agent"):
+    """
+    Stream AI analysis report (SSE).
+    Modes:
+    - multi_agent: Full debate (Technician vs Risk vs Fundamental -> CIO)
+    - single_prompt: Quick analysis using single robust prompt (Legacy/Fast)
+    """
+    async def _stream_generator():
+        try:
+            # 1. Prepare Data
+            from data_fetcher import fetch_data_dispatcher, calculate_start_date, fetch_stock_info
+            from indicator_calc import calculate_indicators, get_latest_metrics
+            from monitor_engine import get_realtime_data
+            
+            yield f"data: {json.dumps({'type': 'progress', 'value': 5, 'message': '🔍 检查本地指标缓存...'})}\n\n"
+            
+            # Check if we have metrics in DB for today
+            today = datetime.now().strftime('%Y-%m-%d')
+            db_metrics = database.get_daily_metrics(symbol, today)
+            
+            # Get info
+            holdings = database.get_all_holdings()
+            stock_info = next((h for h in holdings if h['symbol'] == symbol), None)
+            if not stock_info:
+                stock_info = fetch_stock_info(symbol)
+                if stock_info:
+                    stock_info['symbol'] = symbol
+            
+            if not stock_info:
+                yield f"data: {json.dumps({'type': 'error', 'content': '找不到标的信息'})}\n\n"
+                return
+
+            tech_data = {}
+            rt_data = {}
+            index_data = {} # Initialize default
+
+            # Strategy: If metrics exist in DB, use them (FAST PATH). Else fetch (SLOW PATH).
+            if db_metrics:
+                 yield f"data: {json.dumps({'type': 'step', 'content': '✅ 命中本地指标缓存，跳过重复计算'})}\n\n"
+                 yield f"data: {json.dumps({'type': 'progress', 'value': 20, 'message': '🚀 加载缓存数据...'})}\n\n"
+                 
+                 # Reconstruct tech_data from db_metrics
+                 tech_data = db_metrics
+                 tech_data['close'] = float(db_metrics['price'] or 0)
+                 tech_data['ma20'] = float(db_metrics['ma20'] or 0)
+                 tech_data['score'] = db_metrics['composite_score']
+                 # We still need realtime index data for context
+                 monitor_engine_conf = monitor_engine.load_config()
+                 index_data = monitor_engine.get_market_index()
+                 
+                 # Construct minimal rt_data from metrics + index
+                 rt_data = {
+                     'price': float(db_metrics['price']),
+                     'change_pct': float(db_metrics['change_pct']),
+                     'volume_ratio': float(db_metrics['volume_ratio'])
+                 }
+                 
+            else:
+                # --- SLOW PATH (Fetch & Calculate) ---
+                yield f"data: {json.dumps({'type': 'progress', 'value': 10, 'message': '📉 正在下载历史K线数据(120天)...'})}\n\n"
+                
+                # Fetch History
+                start_date = calculate_start_date(120)
+                asset_type = stock_info.get('asset_type', 'stock')
+                df = fetch_data_dispatcher(symbol, asset_type, start_date)
+                
+                if df is None or df.empty:
+                    yield f"data: {json.dumps({'type': 'error', 'content': '历史数据获取失败'})}\n\n"
+                    return
+                
+                yield f"data: {json.dumps({'type': 'step', 'content': '✅ 历史数据获取完成'})}\n\n"
+                yield f"data: {json.dumps({'type': 'progress', 'value': 15, 'message': '🧮 正在计算技术指标(MA/RSI/MACD)...'})}\n\n"
+                df = calculate_indicators(df)
+                tech_data = get_latest_metrics(df, float(stock_info.get('cost_price') or 0))
+                
+                yield f"data: {json.dumps({'type': 'step', 'content': '✅ 核心指标计算完成'})}\n\n"
+                yield f"data: {json.dumps({'type': 'progress', 'value': 25, 'message': '📡 正在同步实时盘口...'})}\n\n"
+                
+                # Fetch Realtime
+                monitor_engine_conf = monitor_engine.load_config() # Refresh config
+                index_data = monitor_engine.get_market_index()
+                rt_dict = get_realtime_data([stock_info])
+                rt_data = rt_dict.get(symbol)
+                
+                if not rt_data:
+                    yield f"data: {json.dumps({'type': 'error', 'content': '实时数据获取失败'})}\n\n"
+                    return
+            
+            # Common Logic
+            # Inject Market Context
+            rt_data['market_index_price'] = index_data.get('price')
+            rt_data['market_index_change'] = index_data.get('change_pct')
+            
+            yield f"data: {json.dumps({'type': 'step', 'content': '✅ 数据准备就绪，进入AI分析阶段'})}\n\n"
+
+            # API Config
+            provider = monitor_engine_conf.get('api', {}).get('provider', 'openai')
+            api_config_key = f"api_{provider}"
+            api_config = monitor_engine_conf.get(api_config_key, monitor_engine_conf.get('api'))
+            
+            if not api_config.get('api_key') and not api_config.get('credentials_path'):
+                 yield f"data: {json.dumps({'type': 'error', 'content': 'API Key 未配置'})}\n\n"
+                 return
+
+            if mode == 'multi_agent':
+                from agent_analyst import MultiAgentSystem
+                yield f"data: {json.dumps({'type': 'progress', 'value': 30, 'message': '🧠 正在组建专家辩论团队...'})}\n\n"
+                
+                system = MultiAgentSystem(api_config)
+                
+                accumulated_html = ""
+                # Pass start_progress to continue smoothly from 30%
+                async for event_json in system.run_debate_stream(stock_info, tech_data, rt_data, start_progress=35):
+                    # Intercept final result to save to DB?
+                    # The stream yields json strings directly
+                    data = json.loads(event_json)
+                    if data['type'] == 'final_html':
+                        accumulated_html = data['content']
+                        # Save to DB
+                        try:
+                            # We construct a composite analysis object
+                            analysis_data = {
+                                'price': rt_data.get('price', 0),
+                                'ma20': tech_data.get('ma20', 0),
+                                'trend_signal': tech_data.get('ma_arrangement', 'MultiAgent'),
+                                'composite_score': tech_data.get('composite_score', 0),
+                                'ai_analysis': accumulated_html
+                            }
+                            # Ensure price is valid
+                            if analysis_data['price'] == 0 and tech_data.get('close') and tech_data.get('close') > 0:
+                                analysis_data['price'] = tech_data['close']
+                                
+                            today = datetime.now().strftime('%Y-%m-%d')
+                            
+                            # Try save strictly as holding analysis first
+                            success = database.save_holding_analysis(symbol, today, analysis_data, mode=mode)
+                            
+                            # If fails (e.g. FK constraint because not in holdings), try save as selection update
+                            if not success:
+                                # We assume it might be a candidate being analyzed on the fly
+                                # Check if it exists in daily_selections for today
+                                current_selection = database.get_daily_selection(symbol, today)
+                                if current_selection:
+                                    print(f"⚠️ {symbol} not in holdings, updating daily selection instead.")
+                                    # Update selection with new AI analysis
+                                    selection_update = {
+                                        'symbol': symbol,
+                                        'name': current_selection.get('name', ''),
+                                        'close_price': analysis_data['price'],
+                                        'volume_ratio': current_selection.get('volume_ratio', 0),
+                                        'composite_score': analysis_data['composite_score'],
+                                        'ai_analysis': accumulated_html # Store HTML or Markdown? Usually DB stores what's passed. Here accumulated_html is HTML from agent.
+                                        # Wait, agent returns HTML. selections table expects markdown usually?
+                                        # Actually in main.py we save markdown.
+                                        # But here 'final_html' is HTML.
+                                        # Ideally we should save Markdown.
+                                        # Agent system yields Markdown in chunks but final_html is converted.
+                                        # We should probably save the raw markdown if possible.
+                                        # But let's stick to HTML string if that's what we have, or fix agent to return markdown.
+                                        # For now, saving HTML in ai_analysis column is acceptable if frontend handles it.
+                                    }
+                                    database.save_daily_selection(today, selection_update)
+                                    
+                        except Exception as e:
+                            print(f"DB Save Error: {e}")
+                            
+                    yield f"data: {event_json}\n\n"
+                    
+            else:
+                # Fallback to Single Prompt (Legacy logic ported to streaming wrapper)
+                # For simplicity, we just run the blocking single gen and yield result
+                yield f"data: {json.dumps({'type': 'progress', 'value': 40, 'message': '⚡️ 单一专家模型快速分析中...'})}\n\n"
+                yield f"data: {json.dumps({'type': 'step', 'content': '⏳ 连接 LLM 模型进行分析...'})}\n\n"
+                
+                # We can reuse the existing `generate_analysis` but it's blocking.
+                # Ideally rewrite to async, but for now wrap it.
+                from llm_analyst import generate_analysis, format_stock_section
+                import markdown
+                
+                # To make it "streamy", we fake it or just wait
+                # Actually LLM generation takes time.
+                
+                # Fake a progress bump while waiting (since blocking)
+                # We can't really bump during blocking call unless we thread it, but for now just wait.
+                
+                analysis = generate_analysis(
+                    stock_info=stock_info,
+                    tech_data=tech_data,
+                    api_config=api_config,
+                    analysis_type="realtime", # Use realtime prompt (simplified for quick analysis)
+                    realtime_data=rt_data
+                )
+                
+                yield f"data: {json.dumps({'type': 'progress', 'value': 90, 'message': '分析生成完毕，正在排版...'})}\n\n"
+                
+                formatted = format_stock_section(stock_info, tech_data, analysis)
+                html = markdown.markdown(formatted, extensions=['tables'])
+                
+                # Save
+                analysis_data = {
+                    'price': rt_data.get('price', 0),
+                    'ma20': tech_data.get('ma20', 0),
+                    'trend_signal': tech_data.get('ma_arrangement', ''),
+                    'composite_score': tech_data.get('composite_score', 0),
+                    'ai_analysis': formatted
+                }
+                # Ensure price is valid
+                if analysis_data['price'] == 0 and tech_data.get('close') and tech_data.get('close') > 0:
+                    analysis_data['price'] = tech_data['close']
+
+                database.save_holding_analysis(symbol, datetime.now().strftime('%Y-%m-%d'), analysis_data, mode=mode)
+                
+                yield f"data: {json.dumps({'type': 'progress', 'value': 100, 'message': '分析完成'})}\n\n"
+                yield f"data: {json.dumps({'type': 'result', 'content': formatted})}\n\n"
+                yield f"data: {json.dumps({'type': 'final_html', 'content': html})}\n\n"
+                yield f"data: {json.dumps({'type': 'complete', 'content': 'Done'})}\n\n"
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            yield f"data: {json.dumps({'type': 'error', 'content': f'系统错误: {str(e)}'})}\n\n"
+
+    return StreamingResponse(
+        _stream_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"  # Disable nginx buffering
+        }
+    )
+
 @app.post("/api/analyze/{symbol}/realtime")
 async def analyze_stock_realtime(symbol: str, background_tasks: BackgroundTasks):
     """Trigger AI Real-time Intraday Analysis"""
@@ -700,10 +1069,17 @@ async def generate_single_stock_report(symbol: str, background_tasks: Background
                 'composite_score': latest.get('composite_score', 0),
                 'ai_analysis': formatted_report  # Save the full markdown report
             }
+            # Ensure price is valid (latest['close'] is updated with RT price if available, but if RT is 0, use history if needed)
+            if analysis_data['price'] == 0 and latest.get('realtime_price', 0) == 0:
+                 # Check if latest original close is non-zero (from history)
+                 # 'latest' is updated above, so check raw close if needed, but fetch logic handles 0 skipping.
+                 # Just a safety check if needed.
+                 pass
+
             analysis_date = datetime.now().strftime('%Y-%m-%d')
 
             try:
-                database.save_holding_analysis(symbol, analysis_date, analysis_data)
+                database.save_holding_analysis(symbol, analysis_date, analysis_data, mode="single_prompt")
                 print(f"✅ Analysis for {symbol} saved to database.")
             except Exception as db_e:
                 print(f"⚠️ Failed to save analysis to DB: {db_e}")
@@ -731,64 +1107,91 @@ async def get_single_analysis_status(symbol: str):
     status = single_analysis_status.get(symbol, {"status": "idle", "message": "", "result": ""})
     return status
 
-@app.get("/api/analyze/{symbol}/latest")
-async def get_latest_analysis(symbol: str):
-    """Get the latest analysis report for a specific stock from database"""
+@app.get("/api/analyze/{symbol}/dates")
+async def get_analysis_dates(symbol: str, mode: str = 'multi_agent'):
+    """Get available analysis dates for a stock"""
+    dates = database.get_analysis_dates_for_stock(symbol, mode=mode)
+    return {"status": "success", "dates": dates}
+
+@app.get("/api/analyze/{symbol}/history")
+async def get_analysis_history(symbol: str, date: str = None, mode: str = 'multi_agent'):
+    """Get analysis report for a specific date (or latest if no date)"""
     try:
         # Get holdings to find stock info
         holdings = database.get_all_holdings()
         stock_info = next((h for h in holdings if h['symbol'] == symbol), None)
 
+        # If not in holdings, it might be a selection candidate
         if not stock_info:
-            return {"status": "not_found", "message": f"股票 {symbol} 不在持仓列表中"}
+             # Try to find in daily selections logic (implied by usage) or just proceed if we can find analysis
+             pass
 
-        # Try to get analysis from database
+        # Try to get analysis from holding_analysis table first
+        import markdown
+        
         try:
-            conn = database.get_connection()
-            cursor = conn.cursor()
-
-            # Query for the most recent analysis
-            cursor.execute("""
-                SELECT analysis_date, price, ma20, trend_signal, composite_score, ai_analysis
-                FROM holding_analysis
-                WHERE symbol = %s
-                ORDER BY analysis_date DESC
-                LIMIT 1
-            """, (symbol,))
-
-            result = cursor.fetchone()
-            cursor.close()
-            conn.close()
+            result = database.get_holding_analysis(symbol, analysis_date=date, mode=mode)
 
             if result:
-                import markdown
                 # Convert markdown to HTML
                 html_result = markdown.markdown(result['ai_analysis'], extensions=['tables', 'fenced_code'])
+                
+                name = stock_info['name'] if stock_info else result.get('name', symbol)
 
                 return {
                     "status": "success",
                     "data": {
                         "symbol": symbol,
-                        "name": stock_info['name'],
-                        "analysis_date": result['analysis_date'].strftime('%Y-%m-%d') if hasattr(result['analysis_date'], 'strftime') else str(result['analysis_date']),
+                        "name": name,
+                        "analysis_date": result['analysis_date'],
                         "price": result['price'],
                         "ma20": result['ma20'],
                         "trend_signal": result['trend_signal'],
                         "composite_score": result['composite_score'],
                         "ai_analysis": result['ai_analysis'],
-                        "html": html_result
+                        "html": html_result,
+                        "mode": mode
                     }
                 }
-            else:
-                return {"status": "no_data", "message": f"暂无 {symbol} 的分析报告"}
+            
+            # If no holding analysis, try fallback to daily_selections (for Screener candidates)
+            # This is important for the new requirement where we only have technical analysis initially
+            # We treat 'candidate' analysis as a special fallback
+            
+            selection = database.get_daily_selection(symbol, selection_date=date)
+            if selection:
+                html_result = markdown.markdown(selection['ai_analysis'], extensions=['tables', 'fenced_code'])
+                 
+                return {
+                    "status": "success",
+                    "data": {
+                        "symbol": symbol,
+                        "name": selection['name'],
+                        "analysis_date": selection['selection_date'],
+                        "price": selection.get('close_price', 0),
+                        "ma20": 0, # Not stored in selections table directly
+                        "trend_signal": "Candidate",
+                        "composite_score": selection['composite_score'],
+                        "ai_analysis": selection['ai_analysis'],
+                        "html": html_result,
+                        "mode": "candidate"
+                    }
+                }
+
+            return {"status": "no_data", "message": f"暂无 {symbol} 的 {mode} 分析报告"}
 
         except Exception as db_error:
             print(f"❌ Database query error for {symbol}: {db_error}")
             return {"status": "error", "message": f"数据库查询失败: {str(db_error)}"}
 
     except Exception as e:
-        print(f"❌ Error getting latest analysis for {symbol}: {e}")
+        print(f"❌ Error getting analysis for {symbol}: {e}")
         return {"status": "error", "message": f"获取失败: {str(e)}"}
+
+@app.get("/api/analyze/{symbol}/latest")
+async def get_latest_analysis(symbol: str, mode: str = 'multi_agent'):
+    """Legacy endpoint for latest analysis"""
+    return await get_analysis_history(symbol, date=None, mode=mode)
 
 # --- Candidate Stock Analysis ---
 
@@ -976,6 +1379,41 @@ async def update_strategy_param(id: int, param: StrategyParamUpdate):
     if success:
         return {"status": "success", "message": f"Updated param {param.key}"}
     raise HTTPException(status_code=400, detail="Update failed")
+
+# --- Static Files & SPA Fallback (must be AFTER all API routes) ---
+
+if USE_VUE_FRONTEND:
+    # Mount Vue dist folder for static assets (js, css, images, etc.)
+    app.mount("/assets", StaticFiles(directory=str(VUE_FRONTEND_PATH / "assets")), name="vue-assets")
+    print("🚀 Using Vue frontend (dist) for static assets")
+
+    @app.get("/{full_path:path}", response_class=HTMLResponse)
+    async def serve_spa_fallback(full_path: str):
+        """Serve index.html for all non-API routes (SPA fallback)"""
+        # Don't intercept API routes
+        if full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="API route not found")
+
+        index_file = VUE_FRONTEND_PATH / "index.html"
+        with open(index_file, "r", encoding="utf-8") as f:
+            return HTMLResponse(content=f.read(), status_code=200)
+else:
+    # 使用 Jinja2 模板 (传统模式)
+    @app.get("/", response_class=HTMLResponse)
+    async def read_root(request: Request):
+        """Render the main dashboard"""
+        return templates.TemplateResponse("index.html", {
+            "request": request,
+            "title": "A-Share Monitor"
+        })
+
+    @app.get("/strategies", response_class=HTMLResponse)
+    async def strategy_config_page(request: Request):
+        """Render the strategy configuration page"""
+        return templates.TemplateResponse("strategies.html", {
+            "request": request,
+            "title": "策略配置中心"
+        })
 
 if __name__ == "__main__":
     uvicorn.run("web_server:app", host="0.0.0.0", port=8100, reload=True, access_log=False)

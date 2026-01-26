@@ -1,7 +1,18 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(ls:*)",
+      "Bash(bash run.sh:*)",
+      "Bash(tree:*)",
+      "Bash(python web_server.py:*)",
+      "Skill(ui-ux-pro-max)",
+      "Skill(ui-ux-pro-max:*)",
+      "Bash(npm run build)",
+      "Bash(pkill:*)",
+      "Bash(curl:*)",
+      "Bash(source venv/bin/activate)",
+      "Bash(npm install:*)"
     ]
   }
 }

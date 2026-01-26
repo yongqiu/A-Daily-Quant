@@ -98,6 +98,7 @@ def create_crypto_prompt(stock_info: Dict[str, Any], tech_data: Dict[str, Any]) 
 **📉 震荡指标：**
 - RSI (14): {tech_data.get('rsi', 'N/A')} (Crypto中，RSI>80才算极度超买，<20极度超卖)
 - 布林带位置：{tech_data.get('boll_position', 'N/A')}%
+- K线形态：{", ".join(tech_data.get('pattern_details', [])) or "无"}
 - ATR波动率：{tech_data.get('atr_pct', 'N/A')}% (注意高波动风险)
 
 **交易策略 (高波动风控)：**
@@ -200,10 +201,14 @@ def create_realtime_etf_prompt(stock_info: Dict[str, Any], history_data: Dict[st
     index_price = realtime_data.get('market_index_price', 'N/A')
     index_change = realtime_data.get('market_index_change', 0)
     
+    # 获取K线形态
+    pattern_details = tech_data.get('pattern_details', [])
+    pattern_str = ", ".join(pattern_details) if pattern_details else "无"
+
     prompt = f"""作为一名资产配置专家，你正在监控【ETF】实盘走势。你的风格是稳健、过滤噪音、关注大趋势。
     
-**一、大盘环境**
-- 上证指数：{index_price} ({index_change}%)
+    **一、大盘环境**
+    - 上证指数：{index_price} ({index_change}%)
 
 **二、ETF实时数据**
 - **标的**：{stock_info['name']} ({stock_info['symbol']})
@@ -213,6 +218,7 @@ def create_realtime_etf_prompt(stock_info: Dict[str, Any], history_data: Dict[st
 **三、核心趋势线**
 - MA60 (牛熊分界)：¥{history_data.get('ma60', 'N/A')}
 - MA20 (波段支撑)：¥{history_data.get('ma20', 'N/A')}
+- K线形态：{pattern_str}
 - 当前位置：{'MA20上方 (安全)' if realtime_data['price'] > history_data.get('ma20', 0) else 'MA20下方 (注意)'} 且 {'MA60上方 (多头)' if realtime_data['price'] > history_data.get('ma60', 0) else 'MA60下方 (空头)'}
 
 **四、决策逻辑**
@@ -360,6 +366,9 @@ def generate_analysis_gemini(
         
         prompt = create_analysis_prompt(stock_info, tech_data, analysis_type, realtime_data)
         
+        # Log the full prompt
+        print(f"\n======== [Gemini Prompt Debug ({analysis_type})] ========\n{prompt}\n=========================================================\n")
+
         # Dynamic System Instruction based on asset type
         asset_type = stock_info.get('asset_type', stock_info.get('type', 'stock'))
         is_etf = (asset_type == 'etf')
@@ -433,6 +442,9 @@ def generate_analysis_openai(
         
         prompt = create_analysis_prompt(stock_info, tech_data, analysis_type, realtime_data)
         
+        # Log the full prompt
+        print(f"\n======== [OpenAI Prompt Debug ({analysis_type})] ========\n{prompt}\n=========================================================\n")
+
         # Dynamic System Instruction based on asset type
         asset_type = stock_info.get('asset_type', stock_info.get('type', 'stock'))
         is_etf = (asset_type == 'etf')
@@ -735,6 +747,7 @@ def format_stock_section(stock_info: Dict[str, Any], tech_data: Dict[str, Any], 
 
 **📈 核心技术信号 (Key Signals)：**
 - **趋势**：MA20排列 **{tech_data.get('ma_arrangement', '未知')}** (价格在MA20{'上方' if tech_data.get('distance_from_ma20', 0) > 0 else '下方'})
+- **形态**：**{", ".join(tech_data.get('pattern_details', [])) or "无明显反转形态"}**
 - **动量**：RSI(14)=**{tech_data.get('rsi', 'N/A')}** | 量比=**{tech_data.get('volume_ratio', 'N/A')}**
 - **结构**：距120日高点 **{f"{tech_data['price_vs_high120']:.2%}" if tech_data.get('price_vs_high120') is not None else 'N/A'}** (越近越好)
 - **风控**：ATR波动率 **{tech_data.get('atr_pct', 'N/A')}%** | 建议止损 **¥{tech_data.get('stop_loss_suggest', 'N/A')}**

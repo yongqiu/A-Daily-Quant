@@ -1,6 +1,23 @@
 import akshare as ak
 import pandas as pd
 from datetime import datetime
+import os
+
+# Clear proxy to avoid connection issues
+# Extended proxy cleanup including ALL_PROXY
+for env_var in ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'ALL_PROXY', 'all_proxy']:
+    if env_var in os.environ:
+        print(f"POPPING ENV VAR: {env_var}")
+        os.environ.pop(env_var)
+
+# Force no_proxy to ignore any system level proxies
+os.environ['no_proxy'] = '*'
+
+# Print current environment variables for debugging
+print("Current Environment (After Cleanup):")
+for k, v in os.environ.items():
+    if "PROXY" in k.upper():
+        print(f"  {k}={v}")
 
 def check_sector_beta():
     print("\n--- Checking Sector Beta Data ---")

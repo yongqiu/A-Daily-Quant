@@ -64,6 +64,7 @@ def init_db():
         id INT AUTO_INCREMENT PRIMARY KEY,
         symbol VARCHAR(20) NOT NULL,
         analysis_date DATE NOT NULL,
+        mode VARCHAR(20) DEFAULT 'multi_agent',
         price DECIMAL(10, 4),
         ma20 DECIMAL(10, 4),
         z_score DECIMAL(10, 4) DEFAULT 0,
@@ -71,7 +72,7 @@ def init_db():
         composite_score INT,
         ai_analysis TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        UNIQUE KEY unique_daily_analysis (symbol, analysis_date),
+        UNIQUE KEY unique_daily_analysis (symbol, analysis_date, mode),
         FOREIGN KEY (symbol) REFERENCES holdings(symbol) ON DELETE CASCADE
     );
     """
@@ -90,6 +91,52 @@ def init_db():
         UNIQUE KEY unique_daily_selection (selection_date, symbol)
     );
     """
+
+    create_metrics_table_sql = """
+    CREATE TABLE IF NOT EXISTS daily_metrics (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        symbol VARCHAR(20) NOT NULL,
+        date DATE NOT NULL,
+        
+        /* Price Data */
+        price DECIMAL(10, 4),
+        change_pct DECIMAL(10, 2),
+        
+        /* Moving Averages */
+        ma5 DECIMAL(10, 4),
+        ma20 DECIMAL(10, 4),
+        ma60 DECIMAL(10, 4),
+        
+        /* Technical Indicators */
+        rsi DECIMAL(10, 2),
+        kdj_k DECIMAL(10, 2),
+        kdj_d DECIMAL(10, 2),
+        macd_dif DECIMAL(10, 4),
+        macd_dea DECIMAL(10, 4),
+        macd_macd DECIMAL(10, 4),
+        volume_ratio DECIMAL(10, 2),
+        
+        /* Scoring & Meta */
+        composite_score INT,
+        rating VARCHAR(20),
+        pattern_flags TEXT,
+        
+        /* Extended Analysis Fields (JSON) */
+        score_breakdown JSON,
+        score_details JSON,
+        operation_suggestion TEXT,
+        
+        /* Additional Metrics */
+        stop_loss_suggest DECIMAL(10, 2),
+        atr_pct DECIMAL(10, 2),
+        price_vs_high120 DECIMAL(10, 4),
+        
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        
+        UNIQUE KEY unique_daily_metric (symbol, date)
+    );
+    """
     
     try:
         conn = get_connection()
@@ -98,11 +145,49 @@ def init_db():
                 cursor.execute(create_table_sql)
                 cursor.execute(create_analysis_table_sql)
                 cursor.execute(create_selection_table_sql)
+                cursor.execute(create_metrics_table_sql)
             conn.commit()
+            
+            # --- Schema Migration for Existing DBs ---
+            check_schema_updates()
+            
         finally:
             conn.close()
     except Exception as e:
         print(f"❌ Database initialization error: {e}")
+
+def check_schema_updates():
+    """Perform schema migrations if needed"""
+    try:
+        conn = get_connection()
+        try:
+            with conn.cursor() as cursor:
+                # 1. Check mode column (Fix: use 'mode' instead of 'analysis_type' as per user feedback/legacy)
+                cursor.execute("SHOW COLUMNS FROM holding_analysis LIKE 'mode'")
+                if not cursor.fetchone():
+                    # Check if I just added analysis_type by mistake and rename it?
+                    cursor.execute("SHOW COLUMNS FROM holding_analysis LIKE 'analysis_type'")
+                    if cursor.fetchone():
+                        print("⚙️ Migrating DB: Renaming analysis_type to mode...")
+                        cursor.execute("ALTER TABLE holding_analysis CHANGE COLUMN analysis_type mode VARCHAR(20) DEFAULT 'multi_agent'")
+                    else:
+                        print("⚙️ Migrating DB: Adding mode column...")
+                        cursor.execute("ALTER TABLE holding_analysis ADD COLUMN mode VARCHAR(20) DEFAULT 'multi_agent' AFTER analysis_date")
+                
+                # 2. Check unique index
+                cursor.execute("SHOW INDEX FROM holding_analysis WHERE Key_name = 'unique_daily_analysis'")
+                indices = cursor.fetchall()
+                if indices:
+                    columns = [row['Column_name'] for row in indices]
+                    if 'mode' not in columns:
+                        print("⚙️ Migrating DB: Updating unique index for multi-mode support...")
+                        cursor.execute("ALTER TABLE holding_analysis DROP INDEX unique_daily_analysis")
+                        cursor.execute("ALTER TABLE holding_analysis ADD UNIQUE KEY unique_daily_analysis (symbol, analysis_date, mode)")
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"⚠️ Schema migration check failed: {e}")
 
 def add_holding(symbol: str, name: str, cost_price: float, position_size: int = 0, asset_type: str = 'stock') -> bool:
     """Add a new holding position"""
@@ -179,10 +264,16 @@ def update_holding(symbol: str, cost_price: Optional[float] = None, position_siz
             sql = f"UPDATE holdings SET {', '.join(updates)} WHERE symbol = %s"
             
             with conn.cursor() as cursor:
+                # 首先检查记录是否存在
+                cursor.execute("SELECT id FROM holdings WHERE symbol = %s", (symbol,))
+                if not cursor.fetchone():
+                    return False
+
                 cursor.execute(sql, tuple(params))
-                row_count = cursor.rowcount
+                # row_count 可能为 0 (如果没有值发生变化)，但这依然算更新成功
+                
             conn.commit()
-            return row_count > 0
+            return True
         except Exception as e:
             print(f"❌ Error updating holding {symbol}: {e}")
             return False
@@ -199,10 +290,14 @@ def get_all_holdings(analysis_date: Optional[str] = None) -> List[Dict[str, Any]
         try:
             with conn.cursor() as cursor:
                 if analysis_date:
+                    # Default join with multi_agent analysis for scoring
                     sql = """
                         SELECT h.*, ha.composite_score
                         FROM holdings h
-                        LEFT JOIN holding_analysis ha ON h.symbol = ha.symbol AND ha.analysis_date = %s
+                        LEFT JOIN holding_analysis ha
+                        ON h.symbol = ha.symbol
+                        AND ha.analysis_date = %s
+                        AND ha.mode = 'multi_agent'
                         ORDER BY h.added_at DESC
                     """
                     cursor.execute(sql, (analysis_date,))
@@ -263,7 +358,7 @@ def get_holding(symbol: str) -> Optional[Dict[str, Any]]:
         print(f"❌ Database connection error: {e}")
         return None
 
-def save_holding_analysis(symbol: str, analysis_date: str, data: Dict[str, Any]) -> bool:
+def save_holding_analysis(symbol: str, analysis_date: str, data: Dict[str, Any], mode: str = 'multi_agent') -> bool:
     """
     Save or update daily analysis for a holding.
     data dict should contain: price, ma20, trend_signal, composite_score, ai_analysis
@@ -274,8 +369,8 @@ def save_holding_analysis(symbol: str, analysis_date: str, data: Dict[str, Any])
             with conn.cursor() as cursor:
                 sql = """
                 INSERT INTO holding_analysis
-                (symbol, analysis_date, price, ma20, trend_signal, composite_score, ai_analysis)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                (symbol, analysis_date, mode, price, ma20, trend_signal, composite_score, ai_analysis)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 ON DUPLICATE KEY UPDATE
                 price = VALUES(price),
                 ma20 = VALUES(ma20),
@@ -287,6 +382,7 @@ def save_holding_analysis(symbol: str, analysis_date: str, data: Dict[str, Any])
                 cursor.execute(sql, (
                     symbol,
                     analysis_date,
+                    mode,
                     data.get('price', 0),
                     data.get('ma20', 0),
                     data.get('trend_signal', ''),
@@ -294,7 +390,7 @@ def save_holding_analysis(symbol: str, analysis_date: str, data: Dict[str, Any])
                     data.get('ai_analysis', '')
                 ))
             conn.commit()
-            print(f"✅ Saved analysis for {symbol} on {analysis_date}")
+            print(f"✅ Saved {mode} analysis for {symbol} on {analysis_date}")
             return True
         except Exception as e:
             print(f"❌ Error saving analysis for {symbol}: {e}")
@@ -345,6 +441,149 @@ def save_daily_selection(selection_date: str, selection_data: Dict[str, Any]) ->
         print(f"❌ Database connection error: {e}")
         return False
 
+def save_daily_metrics(date: str, metrics: Dict[str, Any]) -> bool:
+    """
+    Save objective hard indicators to daily_metrics table.
+    """
+    try:
+        conn = get_connection()
+        try:
+            with conn.cursor() as cursor:
+                sql = """
+                INSERT INTO daily_metrics
+                (symbol, date, price, change_pct,
+                 ma5, ma20, ma60,
+                 rsi, kdj_k, kdj_d,
+                 macd_dif, macd_dea, macd_macd,
+                 volume_ratio, composite_score, rating, pattern_flags,
+                 score_breakdown, score_details, operation_suggestion,
+                 stop_loss_suggest, atr_pct, price_vs_high120)
+                VALUES (%s, %s, %s, %s,
+                        %s, %s, %s,
+                        %s, %s, %s,
+                        %s, %s, %s,
+                        %s, %s, %s, %s,
+                        %s, %s, %s,
+                        %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                price=VALUES(price), change_pct=VALUES(change_pct),
+                ma5=VALUES(ma5), ma20=VALUES(ma20), ma60=VALUES(ma60),
+                rsi=VALUES(rsi), kdj_k=VALUES(kdj_k), kdj_d=VALUES(kdj_d),
+                macd_dif=VALUES(macd_dif), macd_dea=VALUES(macd_dea), macd_macd=VALUES(macd_macd),
+                volume_ratio=VALUES(volume_ratio), composite_score=VALUES(composite_score),
+                rating=VALUES(rating), pattern_flags=VALUES(pattern_flags),
+                score_breakdown=VALUES(score_breakdown), score_details=VALUES(score_details),
+                operation_suggestion=VALUES(operation_suggestion),
+                stop_loss_suggest=VALUES(stop_loss_suggest), atr_pct=VALUES(atr_pct),
+                price_vs_high120=VALUES(price_vs_high120)
+                """
+                
+                # Helper to dump JSON safely
+                import json
+                def dump_json(obj):
+                    if not obj: return None
+                    try:
+                        return json.dumps(obj, ensure_ascii=False)
+                    except:
+                        return None
+                
+                cursor.execute(sql, (
+                    metrics['symbol'],
+                    date,
+                    metrics.get('price', 0),
+                    metrics.get('change_pct', 0),
+                    metrics.get('ma5'),
+                    metrics.get('ma20'),
+                    metrics.get('ma60'),
+                    metrics.get('rsi'),
+                    metrics.get('kdj_k'),
+                    metrics.get('kdj_d'),
+                    metrics.get('macd_dif'),
+                    metrics.get('macd_dea'),
+                    metrics.get('macd_macd'),
+                    metrics.get('volume_ratio'),
+                    metrics.get('composite_score'),
+                    metrics.get('rating', ''),
+                    metrics.get('pattern_flags', ''),
+                    dump_json(metrics.get('score_breakdown')),
+                    dump_json(metrics.get('score_details')),
+                    metrics.get('operation_suggestion', ''),
+                    metrics.get('stop_loss_suggest'),
+                    metrics.get('atr_pct'),
+                    metrics.get('price_vs_high120')
+                ))
+            conn.commit()
+            print(f"✅ Saved daily metrics for {metrics['symbol']} on {date}")
+            return True
+        except Exception as e:
+            print(f"❌ Error saving daily metrics: {e}")
+            return False
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"❌ Database connection error: {e}")
+        return False
+
+def get_all_daily_metrics(date: str) -> Dict[str, Dict[str, Any]]:
+    """
+    Get metrics for ALL symbols on a specific date.
+    Returns a dict keyed by symbol: { '600000': {...metrics...} }
+    """
+    try:
+        conn = get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT * FROM daily_metrics WHERE date = %s",
+                    (date,)
+                )
+                rows = cursor.fetchall()
+                
+                result = {}
+                for row in rows:
+                    # Parse JSON fields simply for completeness, though we mainly need composite_score
+                    result[row['symbol']] = row
+                
+                return result
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"❌ Error fetching all daily metrics: {e}")
+        return {}
+
+def get_daily_metrics(symbol: str, date: str) -> Optional[Dict[str, Any]]:
+    """Get metrics for specific symbol and date"""
+    try:
+        conn = get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT * FROM daily_metrics WHERE symbol = %s AND date = %s",
+                    (symbol, date)
+                )
+                row = cursor.fetchone()
+                if row:
+                    # Parse JSON fields if they exist as strings (depends on driver/mysql version)
+                    # Pymysql with json might return dict or str
+                    for field in ['score_breakdown', 'score_details']:
+                        if isinstance(row.get(field), str):
+                            try:
+                                row[field] = json.loads(row[field])
+                            except:
+                                row[field] = []
+                    
+                    # Ensure pattern_flags is a list for consistency in API if it was saved as comma-str
+                    if row.get('pattern_flags') and isinstance(row['pattern_flags'], str):
+                        # It is saved as comma string, keep it but maybe API wants list in future
+                        pass
+                        
+                return row
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"❌ Error fetching daily metrics: {e}")
+        return None
+
 def get_daily_analysis_by_date(analysis_date: str) -> List[Dict[str, Any]]:
     """
     Get all holding analyses for a specific date.
@@ -387,21 +626,21 @@ def get_daily_analysis_by_date(analysis_date: str) -> List[Dict[str, Any]]:
         print(f"❌ Error fetching daily analysis for {analysis_date}: {e}")
         return []
 
-def get_holding_analysis(symbol: str, analysis_date: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def get_holding_analysis(symbol: str, analysis_date: Optional[str] = None, mode: str = 'multi_agent') -> Optional[Dict[str, Any]]:
     """
     Get holding analysis from DB.
-    If date is None, gets the latest analysis.
+    If date is None, gets the latest analysis of specific type.
     """
     try:
         conn = get_connection()
         try:
             with conn.cursor() as cursor:
                 if analysis_date:
-                    sql = "SELECT * FROM holding_analysis WHERE symbol = %s AND analysis_date = %s"
-                    params = (symbol, analysis_date)
+                    sql = "SELECT * FROM holding_analysis WHERE symbol = %s AND analysis_date = %s AND mode = %s"
+                    params = (symbol, analysis_date, mode)
                 else:
-                    sql = "SELECT * FROM holding_analysis WHERE symbol = %s ORDER BY analysis_date DESC LIMIT 1"
-                    params = (symbol,)
+                    sql = "SELECT * FROM holding_analysis WHERE symbol = %s AND mode = %s ORDER BY analysis_date DESC LIMIT 1"
+                    params = (symbol, mode)
                 
                 cursor.execute(sql, params)
                 row = cursor.fetchone()
@@ -411,6 +650,7 @@ def get_holding_analysis(symbol: str, analysis_date: Optional[str] = None) -> Op
                      return {
                         'symbol': row['symbol'],
                         'analysis_date': row['analysis_date'].strftime('%Y-%m-%d'),
+                        'mode': row.get('mode', 'multi_agent'),
                         'price': float(row['price']) if row['price'] else 0,
                         'ma20': float(row['ma20']) if row['ma20'] else 0,
                         'trend_signal': row['trend_signal'],
@@ -422,6 +662,61 @@ def get_holding_analysis(symbol: str, analysis_date: Optional[str] = None) -> Op
             conn.close()
     except Exception as e:
         print(f"❌ Error fetching analysis for {symbol}: {e}")
+        return None
+
+def get_analysis_dates_for_stock(symbol: str, mode: str = 'multi_agent') -> List[str]:
+    """Get list of available analysis dates for a stock"""
+    try:
+        conn = get_connection()
+        try:
+            with conn.cursor() as cursor:
+                sql = "SELECT DISTINCT analysis_date FROM holding_analysis WHERE symbol = %s AND mode = %s ORDER BY analysis_date DESC"
+                cursor.execute(sql, (symbol, mode))
+                rows = cursor.fetchall()
+                return [row['analysis_date'].strftime('%Y-%m-%d') for row in rows]
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"❌ Error fetching analysis dates for {symbol}: {e}")
+        return []
+
+def get_daily_selection(symbol: str, selection_date: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    Get a specific daily selection from DB.
+    """
+    try:
+        conn = get_connection()
+        try:
+            with conn.cursor() as cursor:
+                if not selection_date:
+                    # Find latest date for this symbol
+                    cursor.execute("SELECT MAX(selection_date) as max_date FROM daily_selections WHERE symbol = %s", (symbol,))
+                    res = cursor.fetchone()
+                    if res and res['max_date']:
+                        selection_date = res['max_date']
+                    else:
+                        return None
+                
+                sql = "SELECT * FROM daily_selections WHERE symbol = %s AND selection_date = %s"
+                cursor.execute(sql, (symbol, selection_date))
+                row = cursor.fetchone()
+                
+                if row:
+                    return {
+                        'symbol': row['symbol'],
+                        'name': row['name'],
+                        'close_price': float(row['close_price']) if row['close_price'] else 0,
+                        'volume_ratio': float(row['volume_ratio']) if row['volume_ratio'] else 0,
+                        'composite_score': row['composite_score'],
+                        'ai_analysis': row['ai_analysis'],
+                        'selection_date': row['selection_date'].strftime('%Y-%m-%d'),
+                        'created_at': row['created_at'].strftime('%H:%M:%S') if row.get('created_at') else ''
+                    }
+                return None
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"❌ Error fetching daily selection for {symbol}: {e}")
         return None
 
 def get_daily_selections(selection_date: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -446,7 +741,7 @@ def get_daily_selections(selection_date: Optional[str] = None) -> List[Dict[str,
                     else:
                         return []
                 
-                sql = "SELECT * FROM daily_selections WHERE selection_date = %s"
+                sql = "SELECT * FROM daily_selections WHERE selection_date = %s ORDER BY created_at DESC"
                 cursor.execute(sql, (selection_date,))
                 rows = cursor.fetchall()
                 
@@ -459,7 +754,8 @@ def get_daily_selections(selection_date: Optional[str] = None) -> List[Dict[str,
                         'volume_ratio': float(row['volume_ratio']) if row['volume_ratio'] else 0,
                         'composite_score': row['composite_score'],
                         'ai_analysis': row['ai_analysis'],
-                         'selection_date': row['selection_date'].strftime('%Y-%m-%d')
+                        'selection_date': row['selection_date'].strftime('%Y-%m-%d'),
+                        'created_at': row['created_at'].strftime('%H:%M:%S') if row.get('created_at') else ''
                     })
                 return result
         finally:

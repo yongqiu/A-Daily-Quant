@@ -1,0 +1,662 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ========================================
+   CYBERPUNK TECH DESIGN SYSTEM V2.0
+   A股量化策略监控平台 - 科技感样式系统
+   ======================================== */
+
+@layer base {
+  :root {
+    /* 核心背景色 */
+    --bg-deep: #050508;
+    --bg-elevated: #0a0d12;
+    --bg-card: #0f1218;
+
+    /* 边框系统 */
+    --border-subtle: rgba(255, 255, 255, 0.04);
+    --border-medium: rgba(255, 255, 255, 0.10);
+    --border-strong: rgba(255, 255, 255, 0.15);
+
+    /* 文字层级 */
+    --text-primary: #f1f5f9;
+    --text-secondary: #a1a8b6;
+    --text-tertiary: #6b7280;
+
+    /* 品牌色 - Electric Indigo */
+    --primary: #6366f1;
+    --primary-glow: rgba(99, 102, 241, 0.15);
+
+    /* 市场涨跌色 */
+    --up: #ef4444;
+    --up-glow: rgba(239, 68, 68, 0.2);
+    --down: #22c55e;
+    --down-glow: rgba(34, 197, 94, 0.2);
+  }
+
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+
+  html {
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    background-color: var(--bg-deep);
+    color: var(--text-primary);
+  }
+
+  body {
+    @apply bg-bg text-text-primary h-screen overflow-hidden;
+  }
+
+  /* 全局滚动条样式 - 科技感极简设计 */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-border-medium rounded-full;
+    transition: background-color 150ms ease;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-border-strong;
+  }
+
+  /* 选中文本样式 */
+  ::selection {
+    @apply bg-primary/30 text-text-primary;
+  }
+
+  /* 焦点样式 */
+  :focus-visible {
+    @apply outline-none ring-2 ring-primary/50 ring-offset-2 ring-offset-bg;
+  }
+}
+
+/* ========================================
+   组件样式层
+   ======================================== */
+@layer components {
+  /* ----------------------------------------
+     布局容器
+     ---------------------------------------- */
+
+  .layout-shell {
+    @apply flex h-screen w-screen overflow-hidden bg-bg;
+  }
+
+  .main-content {
+    @apply flex-1 flex flex-col h-full min-w-0 overflow-hidden relative;
+  }
+
+  /* ----------------------------------------
+     面板组件
+     ---------------------------------------- */
+
+  .panel-base {
+    @apply bg-bg-elevated border border-border-subtle;
+  }
+
+  .panel-elevated {
+    @apply bg-bg-card border border-border-subtle shadow-card;
+  }
+
+  /* 仪表盘卡片 - 带科技感边框 */
+  .dashboard-card {
+    @apply bg-bg-card rounded-lg border border-border-subtle;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+    transition: all 200ms ease;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .dashboard-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: linear-gradient(90deg,
+      transparent 0%,
+      rgba(99, 102, 241, 0.3) 50%,
+      transparent 100%);
+    opacity: 0;
+    transition: opacity 200ms ease;
+  }
+
+  .dashboard-card:hover {
+    @apply border-border-medium shadow-card-hover;
+  }
+
+  .dashboard-card:hover::before {
+    opacity: 1;
+  }
+
+  .dashboard-card-header {
+    @apply px-4 py-3 border-b border-border-subtle flex items-center justify-between;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.02) 0%, transparent 100%);
+  }
+
+  .dashboard-card-title {
+    @apply text-xs font-semibold uppercase tracking-wider text-text-tertiary select-none;
+  }
+
+  /* ----------------------------------------
+     按钮系统
+     ---------------------------------------- */
+
+  /* 图标按钮 - 用于工具栏 */
+  .btn-icon {
+    @apply p-2 rounded-lg text-text-secondary transition-all duration-200;
+    @apply hover:text-text-primary hover:bg-white/5;
+    @apply active:scale-95;
+  }
+
+  /* 主按钮 - 品牌色 */
+  .btn-primary {
+    @apply px-4 py-2 rounded-lg text-sm font-semibold;
+    @apply bg-primary text-white;
+    @apply hover:bg-primary/90;
+    @apply active:scale-95;
+    @apply transition-all duration-200;
+    @apply shadow-glow-primary;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .btn-primary::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(135deg,
+      rgba(255, 255, 255, 0.1) 0%,
+      transparent 50%);
+    opacity: 0;
+    transition: opacity 200ms ease;
+  }
+
+  .btn-primary:hover::before {
+    opacity: 1;
+  }
+
+  /* 次要按钮 */
+  .btn-secondary {
+    @apply px-4 py-2 rounded-lg text-sm font-medium;
+    @apply bg-bg-elevated border border-border-subtle text-text-secondary;
+    @apply hover:border-border-medium hover:text-text-primary;
+    @apply active:scale-95;
+    @apply transition-all duration-200;
+  }
+
+  /* 幽灵按钮 */
+  .btn-ghost {
+    @apply px-4 py-2 rounded-lg text-sm font-medium;
+    @apply text-text-secondary;
+    @apply hover:bg-white/5 hover:text-text-primary;
+    @apply active:scale-95;
+    @apply transition-all duration-200;
+  }
+
+  /* 危险按钮 */
+  .btn-danger {
+    @apply px-4 py-2 rounded-lg text-sm font-semibold;
+    @apply bg-danger/10 border border-danger/30 text-danger;
+    @apply hover:bg-danger/20 hover:border-danger/50;
+    @apply active:scale-95;
+    @apply transition-all duration-200;
+  }
+
+  /* ----------------------------------------
+     徽章与标签
+     ---------------------------------------- */
+
+  .badge {
+    @apply inline-flex items-center px-2 py-0.5 rounded;
+    @apply text-[10px] font-mono font-semibold uppercase tracking-wide;
+    @apply border;
+  }
+
+  .badge-up {
+    @apply bg-up/10 border-up/30 text-up;
+  }
+
+  .badge-down {
+    @apply bg-down/10 border-down/30 text-down;
+  }
+
+  .badge-primary {
+    @apply bg-primary/10 border-primary/30 text-primary;
+  }
+
+  .badge-success {
+    @apply bg-success/10 border-success/30 text-success;
+  }
+
+  .badge-warning {
+    @apply bg-warning/10 border-warning/30 text-warning;
+  }
+
+  .badge-danger {
+    @apply bg-danger/10 border-danger/30 text-danger;
+  }
+
+  /* ----------------------------------------
+     数据显示
+     ---------------------------------------- */
+
+  .digit-display {
+    @apply font-mono tracking-tight tabular-nums;
+  }
+
+  .digit-display-lg {
+    @apply digit-display text-2xl font-bold;
+  }
+
+  .digit-display-md {
+    @apply digit-display text-lg font-semibold;
+  }
+
+  .digit-display-sm {
+    @apply digit-display text-sm;
+  }
+
+  /* 涨跌颜色类 */
+  .text-up {
+    color: #ef4444;
+  }
+
+  .text-down {
+    color: #22c55e;
+  }
+
+  .bg-up {
+    background-color: rgba(239, 68, 68, 0.1);
+  }
+
+  .bg-down {
+    background-color: rgba(34, 197, 94, 0.1);
+  }
+
+  /* ----------------------------------------
+     列表与表格
+     ---------------------------------------- */
+
+  .list-item-hover {
+    @apply cursor-pointer transition-all duration-150;
+    @apply hover:bg-white/[0.03];
+  }
+
+  .list-item-active {
+    @apply bg-primary/5 border-l-2 border-primary;
+  }
+
+  .table-base {
+    @apply w-full text-sm text-text-secondary;
+  }
+
+  .table-base th {
+    @apply px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-text-tertiary;
+    @apply border-b border-border-subtle bg-bg-elevated/50;
+  }
+
+  .table-base td {
+    @apply px-4 py-3 border-b border-border-subtle;
+  }
+
+  .table-base tr:hover td {
+    @apply bg-white/[0.02];
+  }
+
+  /* ----------------------------------------
+     输入框
+     ---------------------------------------- */
+
+  .input-base {
+    @apply w-full px-3 py-2 rounded-lg;
+    @apply bg-bg-input border border-border-subtle;
+    @apply text-text-primary placeholder:text-text-tertiary;
+    @apply transition-all duration-200;
+    @apply focus:border-primary/50 focus:ring-2 focus:ring-primary/20;
+  }
+
+  .input-base:hover {
+    @apply border-border-medium;
+  }
+
+  /* ----------------------------------------
+     加载状态
+     ---------------------------------------- */
+
+  .spinner {
+    @apply w-5 h-5 rounded-full border-2 border-border-subtle;
+    border-top-color: currentColor;
+    animation: spin 1s linear infinite;
+  }
+
+  .skeleton {
+    @apply bg-bg-elevated rounded;
+    background: linear-gradient(
+      90deg,
+      rgba(255, 255, 255, 0.03) 0%,
+      rgba(255, 255, 255, 0.08) 50%,
+      rgba(255, 255, 255, 0.03) 100%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 2s linear infinite;
+  }
+
+  /* ----------------------------------------
+     Markdown内容样式
+     ---------------------------------------- */
+
+  .prose {
+    @apply text-text-secondary text-sm leading-relaxed max-w-none;
+    /* 确保内容可以正确换行和滚动 */
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+  }
+
+  .prose h1,
+  .prose h2,
+  .prose h3,
+  .prose h4 {
+    @apply text-text-primary font-semibold mt-4 mb-2;
+  }
+
+  .prose h1 {
+    @apply text-xl font-bold;
+  }
+
+  .prose h2 {
+    @apply text-lg font-bold;
+  }
+
+  .prose h3 {
+    @apply text-base font-semibold;
+  }
+
+  .prose h4 {
+    @apply text-sm font-semibold;
+  }
+
+  .prose p {
+    @apply mb-3 leading-relaxed;
+  }
+
+  .prose strong,
+  .prose b {
+    @apply text-text-primary font-bold;
+  }
+
+  .prose em,
+  .prose i {
+    @apply italic;
+  }
+
+  .prose ul,
+  .prose ol {
+    @apply list-disc list-inside space-y-1 my-2 text-text-secondary;
+    padding-left: 0.5rem;
+  }
+
+  .prose ol {
+    @apply list-decimal;
+  }
+
+  .prose li {
+    @apply mb-1;
+  }
+
+  /* 嵌套列表 */
+  .prose ul ul,
+  .prose ol ol,
+  .prose ul ol,
+  .prose ol ul {
+    @apply my-1 ml-4;
+  }
+
+  .prose code {
+    @apply px-1.5 py-0.5 rounded bg-bg-elevated border border-border-subtle;
+    @apply text-xs font-mono text-primary;
+    word-break: break-word;
+  }
+
+  .prose pre {
+    @apply p-3 rounded-lg bg-bg-elevated border border-border-subtle overflow-x-auto;
+    @apply my-3;
+  }
+
+  .prose pre code {
+    @apply bg-transparent border-none p-0 text-text-secondary;
+  }
+
+  .prose table {
+    @apply w-full my-3 border-collapse text-sm;
+  }
+
+  .prose th,
+  .prose td {
+    @apply px-3 py-2 border border-border-subtle text-left;
+  }
+
+  .prose th {
+    @apply bg-bg-elevated/50 font-semibold text-text-tertiary;
+  }
+
+  .prose tr:hover td {
+    @apply bg-white/[0.02];
+  }
+
+  .prose a {
+    @apply text-primary hover:text-primary/80 hover:underline transition-colors;
+  }
+
+  .prose blockquote {
+    @apply pl-3 border-l-2 border-border-medium my-3;
+    @apply text-text-tertiary italic;
+  }
+
+  .prose hr {
+    @apply my-4 border-t border-border-subtle;
+  }
+
+  /* 图片样式 */
+  .prose img {
+    @apply max-w-full h-auto my-3 rounded-lg;
+  }
+
+  /* 定义列表 */
+  .prose dt {
+    @apply font-semibold text-text-primary mb-1;
+  }
+
+  .prose dd {
+    @apply ml-4 mb-2 text-text-secondary;
+  }
+
+  /* ----------------------------------------
+     网格背景装饰
+     ---------------------------------------- */
+
+  .bg-grid {
+    background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32' width='32' height='32' fill='none' stroke='rgb(255 255 255 / 0.04)'%3e%3cpath d='M0 .5H31.5V32'/%3e%3c/svg%3e");
+    background-size: 32px 32px;
+  }
+
+  .bg-grid-lg {
+    background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48' width='48' height='48' fill='none' stroke='rgb(255 255 255 / 0.05)'%3e%3cpath d='M0 .5H47.5V48'/%3e%3c/svg%3e");
+    background-size: 48px 48px;
+  }
+
+  /* ----------------------------------------
+     光晕效果容器
+     ---------------------------------------- */
+
+  .glow-container {
+    position: relative;
+  }
+
+  .glow-container::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    padding: 1px;
+    background: linear-gradient(135deg,
+      rgba(99, 102, 241, 0.3),
+      rgba(6, 182, 212, 0.1),
+      rgba(168, 85, 247, 0.2));
+    -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    opacity: 0;
+    transition: opacity 300ms ease;
+  }
+
+  .glow-container:hover::after {
+    opacity: 1;
+  }
+
+  /* ----------------------------------------
+     过渡动画
+     ---------------------------------------- */
+
+  .transition-fade {
+    transition: opacity 200ms ease, transform 200ms ease;
+  }
+
+  .transition-slide {
+    transition: transform 250ms ease;
+  }
+
+  .transition-all-smooth {
+    transition: all 300ms cubic-bezier(0.4, 0, 0.2, 1);
+  }
+}
+
+/* ========================================
+   工具类层扩展
+   ======================================== */
+@layer utilities {
+  /* 文本渐变 */
+  .text-gradient {
+    @apply bg-gradient-to-r from-primary via-cyan to-purple bg-clip-text text-transparent;
+  }
+
+  .text-gradient-primary {
+    @apply bg-gradient-to-r from-primary to-primary/70 bg-clip-text text-transparent;
+  }
+
+  /* 玻璃态效果 */
+  .glass {
+    background: rgba(15, 18, 24, 0.8);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+  }
+
+  .glass-light {
+    background: rgba(10, 13, 18, 0.6);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+  }
+
+  /* 发光边框 */
+  .glow-border-primary {
+    box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.3),
+                0 0 20px rgba(99, 102, 241, 0.1);
+  }
+
+  .glow-border-success {
+    box-shadow: 0 0 0 1px rgba(16, 185, 129, 0.3),
+                0 0 20px rgba(16, 185, 129, 0.1);
+  }
+
+  .glow-border-danger {
+    box-shadow: 0 0 0 1px rgba(244, 63, 94, 0.3),
+                0 0 20px rgba(244, 63, 94, 0.1);
+  }
+
+  /* 自定义滚动条隐藏 */
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* 自定义滚动条细长 */
+  .scrollbar-thin {
+    scrollbar-width: thin;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+  }
+
+  /* 脉冲发光动画 */
+  .animate-pulse-glow {
+    animation: pulse-glow 2s ease-in-out infinite alternate;
+  }
+
+  @keyframes pulse-glow {
+    0% {
+      box-shadow: 0 0 5px rgba(99, 102, 241, 0.2);
+    }
+    100% {
+      box-shadow: 0 0 20px rgba(99, 102, 241, 0.4),
+                  0 0 40px rgba(99, 102, 241, 0.2);
+    }
+  }
+
+  /* 扫描线效果 */
+  .scanline::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: linear-gradient(180deg,
+      transparent 0%,
+      rgba(99, 102, 241, 0.3) 50%,
+      transparent 100%);
+    animation: scanline 3s linear infinite;
+    pointer-events: none;
+  }
+
+  /* 网格背景图案 */
+  .bg-pattern-grid {
+    background-image:
+      linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+    background-size: 24px 24px;
+  }
+
+  .bg-pattern-grid-lg {
+    background-image:
+      linear-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.05) 1px, transparent 1px);
+    background-size: 48px 48px;
+  }
+
+  /* 点阵图案 */
+  .bg-pattern-dots {
+    background-image: radial-gradient(rgba(255, 255, 255, 0.08) 1px, transparent 1px);
+    background-size: 16px 16px;
+  }
+}
