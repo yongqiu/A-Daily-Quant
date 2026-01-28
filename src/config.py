@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Adapter for Project A (a_daily_strategy) to support Project B's data_provider.
+Adapter for Project A (A-Daily-Quant) to support Project B's data_provider.
 Reads config.json and exposes a Config object compatible with daily_stock_analysis.
 """
 import os

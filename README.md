@@ -1,68 +1,60 @@
-# A股交易纪律助手 (A-Share Daily Strategy)
+# A-Daily-Quant (A股量化决策系统)
 
-<p align="center">
+<div align="center">
   <img src="https://img.shields.io/badge/Python-3.9+-blue.svg" alt="Python">
-  <img src="https://img.shields.io/badge/FastAPI-0.100+-green.svg" alt="FastAPI">
-  <img src="https://img.shields.io/badge/Status-Active-success.svg" alt="Status">
-</p>
+  <img src="https://img.shields.io/badge/Strategy-Quant-orange.svg" alt="Strategy">
+  <img src="https://img.shields.io/badge/AI-LLM%20Powered-purple.svg" alt="AI">
+  <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License">
+</div>
+
+<div align="center">
+  <h3>数据驱动决策 · AI 赋能交易 · 严守风控纪律</h3>
+</div>
+
+---
 
 ## 📖 项目简介
 
-**A股交易纪律助手** 是一个集成量化数据分析、AI 智能解读与交易纪律管理的辅助系统。旨在通过自动化技术指标监控和 AI 深度分析，帮助交易者克服情绪化交易，严格执行“趋势为王、风险第一”的交易纪律。
+**A-Daily-Quant** 是一个专为 A 股市场打造的现代化量化决策系统。它不仅仅是一个选股工具，更是一个集成了**数据清洗**、**量化分析**、**AI 深度解读**与**实时风控**的完整交易辅助平台。
 
-该系统整合了 **AkShare**、**Tushare** 等多源财经数据，利用 **LLM (大语言模型)** 对个股、ETF 进行深度分析，并提供实时的 Web 监控面板。
+区别于传统的量化框架，本项目深度融合了 **LLM (大语言模型)** 能力，能够像专业投顾一样，结合技术指标与市场情绪，为你提供有逻辑、有温度的交易建议。
 
-### 核心功能
+## ✨ 核心特性
 
-*   **📊 多维度技术分析**：自动计算 MA20、RSI、MACD 等核心指标，判断趋势状态。
-*   **🤖 AI 智能投顾**：集成 OpenAI/Google Gemini/DeepSeek 等大模型，生成专业的行情解读与操作建议。
-*   **📡 实时盘面监控**：通过 Web 面板实时监控自选股与持仓的量比、涨跌幅及资金流向。
-*   **🛡️ 交易纪律风控**：基于 Beta Shield 理论，监控大盘环境，动态调整仓位建议。
-*   **📝 自动化研报**：每日自动生成包含持仓分析、市场概况和潜力股筛选的 Markdown/HTML 研报。
+*   **🧠 AI 智脑 (Agent Analyst)**: 集成 OpenAI/Gemini/DeepSeek 等大模型，对持仓和标的进行深度复盘与预测。
+*   **📊 量化筛选 (Quant Screener)**: 基于“趋势跟踪 + 资金共振”逻辑，每日自动扫描全市场，捕捉强势股。
+*   **🛡️ 动态风控 (Risk Shield)**: 独创 Beta Shield 风控模型，根据大盘环境动态调整仓位建议，在大跌前强制空仓。
+*   **📡 实时雷达 (Real-time Monitor)**: Web 可视化看板，实时监控自选股的量比、资金流向与盘口异常。
+*   **📝 自动化研报 (Auto Report)**: 每日盘后自动生成精美的 HTML/Markdown 研报，复盘当日操作与明日计划。
 
-## 🧠 核心策略说明
+## 🏗️ 系统架构
 
-### 1. 持仓监控与分析 (Holding Monitor)
-系统全天候监控持仓标的，支持股票、ETF、可转债及数字货币等多资产类型。
-*   **实时异动监控**:
-    *   **量比爆发**: 监控量比 > 2.0 且上涨的标的，捕捉主力资金介入迹象。
-    *   **急涨急跌**: 监控日内涨跌幅超过阈值（股票 4%，ETF 1.5%）的异常波动。
-    *   **跳空高开**: 识别开盘跳空缺口（> 2%），预示强势行情。
-*   **多因子评分**: 结合技术面（MA、MACD、RSI）、资金面（主力净流入、龙虎榜）及市场情绪进行综合打分。
-*   **AI 深度解读**: 调用 LLM 对持仓进行每日盘后复盘，生成操作建议（加仓、减仓、持有）。
-
-### 2. 智能选股策略 (Smart Selection)
-基于“趋势跟踪 + 资金共振”的选股逻辑，每日自动扫描全市场 5000+ 只股票。
-*   **第 1 步：市场风控 (Market Filter)**
-    *   大盘（上证指数）处于 20 日均线下方且单日跌幅 > 1% 时，强制停止选股，空仓避险。
-*   **第 2 步：粗筛 (Rough Screen)**
-    *   过滤掉 ST、退市及流动性差的标的。
-    *   筛选条件：量比放大、换手率适中、市值适中。
-*   **第 3 步：精选 (Deep Screen) - 趋势策略**
-    *   **均线多头排列**: 严格要求 MA5 > MA10 > MA20。
-    *   **乖离率控制**: 要求股价偏离 MA5 不超过 5%，避免追高。
-    *   **缩量回调**: 优先选择上涨趋势中缩量回调的个股。
-
-## 🛠️ 技术栈
-
-*   **后端核心**: Python 3.10+
-*   **Web 框架**: FastAPI, Uvicorn
-*   **数据源**: AkShare (主), Tushare (辅), Tencent/Sina (实时)
-*   **数据存储**: SQLite / MySQL (通过 `database.py` 抽象层)
-*   **AI 接口**: OpenAI Compatible API (支持 GPT-4, Gemini, DeepSeek, Claude 等)
+```mermaid
+graph TD
+    Data[数据层<br>AkShare/Tushare/Efinance] --> Engine[核心引擎<br>Monitor Engine]
+    Engine --> |清洗 & 计算| Calculator[指标计算<br>Indicator Calc]
+    Calculator --> |量化因子| Screener[选股器<br>Stock Screener]
+    Calculator --> |技术状态| AI[AI 分析师<br>LLM Analyst]
+    
+    Screener --> |候选标的| DB[(数据库<br>SQLite/MySQL)]
+    AI --> |分析报告| DB
+    
+    DB --> Web[Web 看板<br>FastAPI + Vue3]
+    DB --> Report[每日研报<br>HTML Generator]
+```
 
 ## 🚀 快速开始
 
 ### 1. 环境准备
 
-确保系统已安装 Python 3.9 或以上版本。
+确保系统已安装 Python 3.9+。
 
 ```bash
 # 克隆项目
-git clone <repository_url>
-cd a_daily_strategy
+git clone https://github.com/yourusername/a-daily-quant.git
+cd a-daily-quant
 
-# 创建并激活虚拟环境 (推荐)
+# 创建虚拟环境
 python -m venv .venv
 source .venv/bin/activate  # macOS/Linux
 # .venv\Scripts\activate   # Windows
@@ -71,85 +63,61 @@ source .venv/bin/activate  # macOS/Linux
 pip install -r requirements.txt
 ```
 
-### 2. 配置文件
+### 2. 配置说明
 
-项目使用 `config.json` 进行配置管理。首次使用请参考以下格式修改：
+在项目根目录创建 `config.json`：
 
 ```json
 {
   "api": {
     "provider": "openai",
     "base_url": "https://api.openai.com/v1",
-    "api_key": "YOUR_API_KEY",
+    "api_key": "sk-xxxxxxxx",
     "model": "gpt-4-turbo"
   },
   "tushare": {
     "token": "YOUR_TUSHARE_TOKEN"
   },
   "monitor": {
-      "watch_list": [
-          {"symbol": "600519", "name": "贵州茅台"},
-          {"symbol": "510300", "name": "沪深300ETF", "asset_type": "etf"}
-      ]
+    "watch_list": [
+      {"symbol": "600519", "name": "贵州茅台"},
+      {"symbol": "510300", "name": "沪深300ETF", "asset_type": "etf"}
+    ]
   }
-  // ... 其他配置项
 }
 ```
 
-> **提示**：可使用提供的 `switch_api.py` 脚本快速切换不同的 LLM 服务商配置。
+### 3. 运行系统
 
-### 3. 运行指南
-
-#### 🖥️ 启动 Web 监控面板 (推荐)
-
-启动 Web 服务器，访问实时监控看板：
+#### 🖥️ 启动 Web 监控台 (推荐)
 
 ```bash
 ./start_web.sh
 ```
-*   默认访问地址: `http://127.0.0.1:8100`
-*   功能：实时行情、个股 AI 分析、策略配置、历史研报查看。
+访问: `http://127.0.0.1:8100`
 
-#### 📝 生成每日研报 (命令行)
-
-如果只需要生成静态分析报告：
+#### 🤖 生成每日策略研报
 
 ```bash
-./run.sh
+python main.py --section all
 ```
-或者手动指定生成部分：
-```bash
-python main.py --section all        # 生成完整报告
-python main.py --section holdings   # 仅持仓分析
-python main.py --section candidates # 仅选股扫描
-```
-报告将生成在 `reports/` 目录下。
+研报将生成在 `reports/` 目录下。
 
 ## 📂 项目结构
 
-```
-a_daily_strategy/
-├── main.py                 # 命令行程序入口（生成报告）
-├── run.sh                  # 报告生成启动脚本
-├── web_server.py           # FastAPI Web 服务器入口
-├── start_web.sh            # Web 服务启动脚本
-├── monitor_engine.py       # 核心监控与调度引擎
-├── stock_screener.py       # 选股策略逻辑
-├── data_fetcher.py         # 统一数据获取层
-├── database.py             # 数据库交互层
-├── llm_analyst.py          # AI 分析模块
-├── report_generator.py     # HTML 报告生成
-├── requirements.txt        # 项目依赖
-├── config.json             # 配置文件
-├── strategies/             # 策略实现目录
-├── templates/              # Web 模板文件
-├── static/                 # 静态资源
-└── reports/                # 生成的报告存储目录
-```
+| 目录/文件 | 说明 |
+| :--- | :--- |
+| `monitor_engine.py` | 核心监控与调度引擎 |
+| `stock_screener.py` | 每日选股策略实现 |
+| `llm_analyst.py` | AI 深度分析模块 (LLM) |
+| `web_server.py` | Web 后端 (FastAPI) |
+| `frontend/` | Web 前端源码 (Vue3) |
+| `strategies/` | 具体的量化策略逻辑 |
+| `reports/` | 自动生成的研报存档 |
 
 ## ⚠️ 免责声明
 
-本项目仅供技术研究与学习使用。**所有分析结果不构成任何投资建议**。市场有风险，投资需谨慎。
+本项目仅供技术研究与学习交流使用。**市场有风险，投资需谨慎**。项目中的任何策略或分析结果均不构成投资建议。
 
 ---
-*Created by A-Share Discipline Assistant Team*
+*Powered by A-Daily-Quant Team*
