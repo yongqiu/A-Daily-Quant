@@ -43,6 +43,7 @@ Thumbs.db
 # Config with sensitive data (optional - remove if you want to track config)
 # config.json
 *.md
+!README.md
 *.html
 
 test_*.py
