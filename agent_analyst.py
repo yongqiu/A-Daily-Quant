@@ -19,17 +19,33 @@ class StockAnalystAgent:
     """
     Represents a single specialized analyst agent.
     """
-    def __init__(self, name: str, role: str, description: str, system_prompt: str):
+
+    def __init__(self, slug: str, name: str, role: str, description: str, system_prompt: str, template: str = None):
+        self.slug = slug
         self.name = name
         self.role = role
         self.description = description
         self.system_prompt = system_prompt
+        self.template = template
 
     async def analyze(self, context: str, api_config: Dict[str, Any]) -> str:
         """
         Perform analysis based on the agent's persona.
         """
-        prompt = f"""
+        # Load Template if available
+        prompt = ""
+        if self.template:
+            from jinja2 import Template
+            t = Template(self.template)
+            prompt = t.render(
+                name=self.name, 
+                role=self.role, 
+                description=self.description, 
+                context=context
+            )
+        else:
+            # Fallback Legacy
+            prompt = f"""
 请你扮演【{self.name}】（{self.role}）。
 你的核心职责是：{self.description}
 
@@ -53,30 +69,7 @@ class StockAnalystAgent:
         provider = api_config.get('provider', 'openai')
         
         try:
-            if provider == 'gemini':
-                # Map config for Gemini
-                response = generate_analysis_gemini(
-                    stock_info={},  # Not used directly if we override logic, but wait, the low level func builds prompt.
-                    # We might need to call client directly if we want custom prompts.
-                    # Let's bypass generate_analysis_gemini's prompt building if possible
-                    # checking llm_analyst.py... create_analysis_prompt is called inside.
-                    # This implies we cannot easily reuse generate_analysis_gemini for custom prompts without modification.
-                    # To avoid modifying llm_analyst heavily, I will implement a simple direct caller here based on llm_analyst's implementation.
-                    tech_data={}, 
-                    project_id=api_config['project_id'],
-                    location=api_config['location'],
-                    credentials_path=api_config.get('credentials_path'),
-                    model=api_config.get('model', 'gemini-2.5-flash'),
-                    analysis_type="custom_agent", # Hack: We need to handle this in llm_analyst OR implement call here.
-                    realtime_data=None 
-                )
-                # Wait, generate_analysis_gemini calls create_analysis_prompt inside.
-                # If analysis_type is unknown, create_analysis_prompt might fail or return default.
-                # It's better to implement a simple_call_llm here.
-                return await self._call_llm_direct(prompt, api_config)
-
-            else:
-                return await self._call_llm_direct(prompt, api_config)
+            return await self._call_llm_direct(prompt, api_config)
                 
         except Exception as e:
             logger.error(f"Agent {self.name} failed: {e}")
@@ -163,32 +156,54 @@ class StockAnalystAgent:
 class MultiAgentSystem:
     def __init__(self, api_config: Dict[str, Any]):
         self.api_config = api_config
-        self.agents = [
-            StockAnalystAgent(
-                name="技术派 (Technician)",
-                role="技术分析专家",
-                description="你是一名纯粹的技术分析师。你只相信图形、趋势、均线（MA）、量价配合（Volume）和动量指标（RSI/MACD）。",
-                system_prompt="你是一名严谨的技术分析师。我不关心基本面，也不关心宏观新闻。我只看价格行为(Price Action)。如果价格跌破均线，就是卖出信号。如果放量突破，就是买入信号。"
-            ),
-            StockAnalystAgent(
-                name="风控官 (Risk Officer)",
-                role="风险控制专家",
-                description="你是团队中的刹车片。你极度厌恶风险。你关注波动率（ATR）、最大回撤、盈亏比（R:R）。你的任务是寻找任何可能导致亏损的理由。",
-                system_prompt="你是一名苛刻的风险控制官。你的职责是泼冷水。我们要保护本金。任何未经确认的上涨都是诱多。任何指标背离都是陷阱。你要指出最坏的情况。"
-            ),
-            StockAnalystAgent(
-                name="基本面 (Fundamentalist)",
-                role="基本面与逻辑分析师",
-                description="你关注资产背后的逻辑。如果是股票，你关注题材、业绩、新闻催化剂。如果是ETF，你关注行业周期。如果是Crypto/期货，你关注宏观情绪。",
-                system_prompt="你是一名具有大局观的研究员。你关注长期逻辑和市场叙事(Narrative)。忽略短期的K线噪音，寻找驱动价格上涨的核心逻辑。"
-            )
+        self.agents = []
+        self._load_agents()
+
+    def _load_agents(self):
+        """Load agents configuration from database"""
+        import database
+        
+        # Define the mapping of agents to DB slugs
+        agent_configs = [
+            {"slug": "agent_technician", "fallback_name": "技术派 (Technician)"},
+            {"slug": "agent_risk_officer", "fallback_name": "风控官 (Risk Officer)"},
+            {"slug": "agent_fundamentalist", "fallback_name": "基本面 (Fundamentalist)"}
         ]
-        self.cio = StockAnalystAgent(
-            name="CIO (首席投资官)",
-            role="决策者",
-            description="你是最终决策者。你需要综合各方专家的意见，做出最终的买卖裁决。",
-            system_prompt="你是一只基金的首席投资官。你需要听取技术派、风控官和基本面研究员的辩论。你的任务是：1. 总结各方观点。 2. 平衡收益与风险。 3. 给出最终的、明确的操作指令（买入/持有/减仓/空仓）。 4. 制定交易计划（仓位、止损位）。不要模棱两可。"
-        )
+        
+        self.agents = []
+        
+        for cfg in agent_configs:
+            strategy = database.get_strategy_by_slug(cfg['slug'])
+            if strategy:
+                self.agents.append(StockAnalystAgent(
+                    slug=cfg['slug'],
+                    name=strategy['name'],
+                    role=strategy['params'].get('role', 'Experts'),
+                    description=strategy.get('description', ''),
+                    system_prompt=strategy['params'].get('system_prompt', ''),
+                    template=strategy.get('template_content')
+                ))
+            else:
+                # Add a dummy fallback or raise error
+                print(f"⚠️ Warning: Agent strategy {cfg['slug']} not found in DB. Using fallback.")
+                # This ensures system doesn't crash if DB init failed
+                pass
+
+        # Load CIO
+        cio_slug = "agent_cio"
+        strategy = database.get_strategy_by_slug(cio_slug)
+        if strategy:
+            self.cio = StockAnalystAgent(
+                slug=cio_slug,
+                name=strategy['name'],
+                role=strategy['params'].get('role', 'CIO'),
+                description=strategy.get('description', ''),
+                system_prompt=strategy['params'].get('system_prompt', ''),
+                template=strategy.get('template_content')
+            )
+        else:
+             print(f"⚠️ Warning: CIO strategy {cio_slug} not found in DB.")
+
 
     async def run_debate_stream(self, stock_info: Dict[str, Any], tech_data: Dict[str, Any], realtime_data: Dict[str, Any], start_progress: int = 30) -> AsyncGenerator[str, None]:
         """

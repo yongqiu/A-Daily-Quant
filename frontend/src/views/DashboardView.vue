@@ -272,30 +272,45 @@
           <div class="absolute inset-0 pointer-events-none bg-grid opacity-30"></div>
 
           <!-- Timeframes -->
-          <div class="absolute top-3 left-4 flex gap-1">
-             <button class="px-2 py-1 text-xs font-medium rounded bg-primary/20 text-primary border border-primary/30" title="日线">日</button>
-             <button class="px-2 py-1 text-xs font-medium rounded text-text-tertiary hover:text-text-secondary hover:bg-white/5 transition-colors" title="周线">周</button>
-             <button class="px-2 py-1 text-xs font-medium rounded text-text-tertiary hover:text-text-secondary hover:bg-white/5 transition-colors" title="月线">月</button>
+          <div class="absolute top-3 left-4 flex gap-1" style="z-index: 10;">
+             <button @click="changePeriod('daily')"
+                     class="px-2 py-1 text-xs font-medium rounded transition-colors"
+                     :class="selectedPeriod === 'daily' ? 'bg-primary/20 text-primary border border-primary/30' : 'text-text-tertiary hover:text-text-secondary hover:bg-white/5'"
+                     title="日线">日</button>
+             <button @click="changePeriod('weekly')"
+                     class="px-2 py-1 text-xs font-medium rounded transition-colors"
+                     :class="selectedPeriod === 'weekly' ? 'bg-primary/20 text-primary border border-primary/30' : 'text-text-tertiary hover:text-text-secondary hover:bg-white/5'"
+                     title="周线">周</button>
+             <button @click="changePeriod('monthly')"
+                     class="px-2 py-1 text-xs font-medium rounded transition-colors"
+                     :class="selectedPeriod === 'monthly' ? 'bg-primary/20 text-primary border border-primary/30' : 'text-text-tertiary hover:text-text-secondary hover:bg-white/5'"
+                     title="月线">月</button>
           </div>
 
           <!-- Technical Indicators Panel -->
           <div class="absolute bottom-0 left-0 right-0 h-32 border-t border-border-subtle bg-bg-elevated/80 backdrop-blur-sm p-3">
              <h3 class="text-xs font-semibold uppercase tracking-wider text-text-tertiary mb-2 flex items-center gap-2">
                <span class="w-1.5 h-1.5 rounded-full bg-cyan"></span>
-               技术指标
+               技术指标 (日线参考)
              </h3>
              <div class="grid grid-cols-3 gap-2">
                  <div class="indicator-card p-2">
                    <span class="text-[9px] text-text-tertiary uppercase tracking-wide">MA20 趋势</span>
-                   <span class="text-xs font-bold text-text-primary mt-0.5 block">{{ selectedStock?.ma20_signal || '---' }}</span>
+                   <span class="text-xs font-bold mt-0.5 block" :class="scoreResult?.trend_signal?.includes('多头') ? 'text-up' : (scoreResult?.trend_signal?.includes('空头') ? 'text-down' : 'text-text-primary')">
+                     {{ scoreResult?.trend_signal || '---' }}
+                   </span>
                  </div>
                  <div class="indicator-card p-2">
                    <span class="text-[9px] text-text-tertiary uppercase tracking-wide">RSI (14)</span>
-                   <span class="text-xs font-bold text-text-primary mt-0.5 block">--</span>
+                   <span class="text-xs font-bold mt-0.5 block" :class="scoreResult?.rsi > 70 ? 'text-warning' : (scoreResult?.rsi < 30 ? 'text-up' : 'text-text-primary')">
+                     {{ scoreResult?.rsi || '--' }}
+                   </span>
                  </div>
                  <div class="indicator-card p-2">
                    <span class="text-[9px] text-text-tertiary uppercase tracking-wide">量比</span>
-                   <span class="text-xs font-bold font-mono text-text-primary mt-0.5 block">--</span>
+                   <span class="text-xs font-bold font-mono text-text-primary mt-0.5 block">
+                     {{ scoreResult?.volume_ratio || '--' }}
+                   </span>
                  </div>
              </div>
           </div>
@@ -442,6 +457,7 @@ const marketStore = useMarketStore()
 // State
 const selectedStockSymbol = ref(null)
 const showKlineChart = ref(false)
+const selectedPeriod = ref('daily') // New: Chart Period
 const analyzing = ref(false)
 const calculatingScore = ref(false)
 const scoreResult = ref(null) // Stores the metrics result
@@ -465,6 +481,14 @@ const selectedStockName = computed(() => selectedStock.value?.name || '---')
 // Chart
 const chartContainer = ref(null)
 const { loadKlineData } = useKlineChart(chartContainer, selectedStockSymbol)
+
+// Change Period Action
+const changePeriod = (period) => {
+    selectedPeriod.value = period
+    if (selectedStockSymbol.value) {
+        loadKlineData(selectedStockSymbol.value, period)
+    }
+}
 
 // Poll Interval
 let pollInterval = null
@@ -772,9 +796,13 @@ watch(() => marketStore.isMonitoring, (newVal) => {
 //   }
 // })
 
-watch(showKlineChart, (newValue) => {
+import { nextTick } from 'vue' // Start of file imports, but adding here for context in replace block if needed or just replace watch
+
+watch(showKlineChart, async (newValue) => {
   if (newValue && selectedStockSymbol.value) {
-    loadKlineData(selectedStockSymbol.value)
+    // Wait for DOM to render the chart container v-if
+    await nextTick()
+    loadKlineData(selectedStockSymbol.value, selectedPeriod.value)
   }
 })
 </script>

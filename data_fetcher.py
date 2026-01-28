@@ -8,6 +8,9 @@ from typing import Optional, Dict, Any
 import requests
 from functools import lru_cache
 import time
+import json
+import os
+from data_fetcher_ts import fetch_stock_data_ts, fetch_stock_info_ts, fetch_sector_map
 
 # Stock info cache: {symbol: (data, timestamp)}
 _stock_info_cache: Dict[str, tuple] = {}
@@ -176,19 +179,56 @@ def fetch_stock_data_tx_fallback(symbol: str, start_date: str, end_date: str) ->
         return None
     return None
 
-def fetch_stock_data(symbol: str, start_date: str, is_index: bool = False) -> Optional[pd.DataFrame]:
+def _get_data_provider() -> str:
+    """Get configured data provider"""
+    try:
+        config_path = os.path.join(os.path.dirname(__file__), 'config.json')
+        if os.path.exists(config_path):
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+                return config.get('data_source', {}).get('provider', 'akshare')
+    except Exception:
+        pass
+    return 'akshare'
+
+def fetch_stock_data(symbol: str, start_date: str, is_index: bool = False, period: str = "daily") -> Optional[pd.DataFrame]:
     """
-    Fetch historical stock data from AkShare
+    Fetch historical stock data from AkShare or Tushare
+    
+    Priority: Tushare > AkShare (Tencent/EastMoney/Sina)
     
     Args:
         symbol: Stock code (e.g., '600519') or index code (e.g., '000300')
         start_date: Start date in 'YYYYMMDD' format
         is_index: True if fetching index data, False for individual stocks
+        period: 'daily', 'weekly', 'monthly'
     
     Returns:
         DataFrame with columns: date, open, close, high, low, volume
         Returns None if fetch fails
     """
+    # 1. Try Tushare First (Primary Source)
+    # Skip ETF/Index if Tushare isn't configured for them or if we know akshare is better
+    # But user requested "Tushare as primary", so we try it for standard stocks.
+    
+    # Simple heuristic: stock codes usually don't start with 5/1 unless ETF/Fund
+    # However, Tushare supports ETFs too.
+    
+    # Try Tushare first for all periods (Daily, Weekly, Monthly)
+    try:
+        print(f"🔄 [DataFetcher] Attempting Tushare history ({period}) for: {symbol}")
+        df_ts = fetch_stock_data_ts(symbol, start_date, period=period)
+        if df_ts is not None and not df_ts.empty:
+            # Check length reasonable?
+            if len(df_ts) > 0:
+                    print(f"✅ [DataFetcher] Tushare success for {symbol} ({len(df_ts)} rows)")
+                    return df_ts
+        print(f"⚠️ [DataFetcher] Tushare returned no data for {symbol}, initiating FALLBACK to AkShare...")
+    except Exception as e:
+        print(f"⚠️ [DataFetcher] Tushare error for {symbol}: {e}, initiating FALLBACK to AkShare...")
+
+    # 2. Fallback to AkShare/Tencent logic
+    print(f"🔄 [DataFetcher] Fallback: Trying AkShare/Tencent for {symbol}...")
     max_retries = 3
     base_delay = 2
     
@@ -207,23 +247,26 @@ def fetch_stock_data(symbol: str, start_date: str, is_index: bool = False) -> Op
             
             # 1. Special Handling for Stocks (Dual Source)
             if not is_index and not (symbol.startswith('51') or symbol.startswith('159')):
-                # Try Tencent First (Stable)
-                df = fetch_stock_data_tx_fallback(symbol, start_date, end_date)
-                if df is not None:
-                     pass # Got it from TX
+                # Try Tencent First (Stable) for Daily
+                if period == 'daily':
+                    df = fetch_stock_data_tx_fallback(symbol, start_date, end_date)
+                    if df is not None:
+                         pass # Got it from TX
+                    else:
+                         # Fallback to EM
+                         df = ak.stock_zh_a_hist(symbol=symbol, period="daily", start_date=start_date, end_date=end_date, adjust="qfq")
                 else:
-                     # Fallback to EM
-                     # Only pass end_date if function signature supports it.
-                     # Standard ak.stock_zh_a_hist accepts end_date
-                     df = ak.stock_zh_a_hist(symbol=symbol, period="daily", start_date=start_date, end_date=end_date, adjust="qfq")
+                    # Weekly/Monthly: Use EM interface
+                    # ak.stock_zh_a_hist param 'period' supports 'daily', 'weekly', 'monthly'
+                    df = ak.stock_zh_a_hist(symbol=symbol, period=period, start_date=start_date, end_date=end_date, adjust="qfq")
 
             elif is_index:
                 # Fetch index data (like 沪深300)
-                df = ak.index_zh_a_hist(symbol=symbol, period="daily", start_date=start_date, end_date=end_date)
+                df = ak.index_zh_a_hist(symbol=symbol, period=period, start_date=start_date, end_date=end_date)
             elif symbol.startswith('51') or symbol.startswith('159'):
                 # ETF codes (51开头或159开头) use ETF-specific interface
-                # Wait end_date slightly? No, em interface handles it.
-                df = ak.fund_etf_hist_em(symbol=symbol, period="daily", start_date=start_date, end_date=end_date)
+                # ak.fund_etf_hist_em supports daily, weekly, monthly
+                df = ak.fund_etf_hist_em(symbol=symbol, period=period, start_date=start_date, end_date=end_date)
             
             if df is None or df.empty:
                 # Sometimes API returns empty for valid stocks if network glitches or start_date issue
@@ -275,12 +318,17 @@ def fetch_stock_data(symbol: str, start_date: str, is_index: bool = False) -> Op
     return None
 
 
-def fetch_data_dispatcher(symbol: str, asset_type: str, start_date: str) -> Optional[pd.DataFrame]:
-    """Dispatch fetch request based on asset type"""
+def fetch_data_dispatcher(symbol: str, asset_type: str, start_date: str, period: str = "daily") -> Optional[pd.DataFrame]:
+    """
+    Dispatch fetch request based on asset type
+    Period: 'daily', 'weekly', 'monthly'
+    """
     if asset_type == 'crypto':
         # approximate days from start_date
+        # TODO: Support crypto period mapping if needed (Binance '1d', '1w', '1M')
         return fetch_crypto_data(symbol, days=120)
     elif asset_type == 'future':
+        # TODO: Support future period if api allows
         return fetch_future_data(symbol, start_date)
     else:
         # Default to stock/etf
@@ -288,7 +336,7 @@ def fetch_data_dispatcher(symbol: str, asset_type: str, start_date: str) -> Opti
         # For simplicity, if passed here, assume standard stock/ETF unless index specified elsewhere
         # If 'sh000001', it's index
         is_index = symbol.lower().startswith('sh') and len(symbol) > 6
-        return fetch_stock_data(symbol, start_date, is_index=is_index)
+        return fetch_stock_data(symbol, start_date, is_index=is_index, period=period)
 
 
 def get_latest_trading_date() -> str:
@@ -304,16 +352,30 @@ def get_latest_trading_date() -> str:
     return today.strftime('%Y%m%d')
 
 
-def calculate_start_date(lookback_days: int = 120) -> str:
+def calculate_start_date(lookback_days: int = None) -> str:
     """
     Calculate start date for data fetching
     
     Args:
-        lookback_days: Number of days to look back (default 120 for MA60 calculation)
+        lookback_days: Number of days to look back (default read from config or 365)
     
     Returns:
         Start date in 'YYYYMMDD' format
     """
+    if lookback_days is None:
+        # Try to load from config
+        try:
+            config_path = os.path.join(os.path.dirname(__file__), 'config.json')
+            if os.path.exists(config_path):
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    lookback_days = config.get('analysis', {}).get('lookback_days', 365)
+        except Exception:
+            pass
+            
+    if lookback_days is None:
+         lookback_days = 365
+         
     start = datetime.now() - timedelta(days=lookback_days + 30)  # Extra buffer for weekends
     return start.strftime('%Y%m%d')
 
@@ -336,6 +398,56 @@ def fetch_sector_data() -> Optional[pd.DataFrame]:
     except Exception as e:
         print(f"❌ Error fetching sector data: {str(e)}")
         return None
+
+SECTOR_MAP_FILE = "sector_map.json"
+
+def load_sector_map() -> Dict[str, str]:
+    """
+    Load sector map. If local file is missing or empty, fetch from Tushare and save.
+    """
+    # 1. Try local file
+    try:
+        if os.path.exists(SECTOR_MAP_FILE):
+            with open(SECTOR_MAP_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if data:
+                    return data
+    except Exception as e:
+        print(f"⚠️ Failed to load local sector_map.json: {e}")
+
+    # 2. Fetch if missing
+    print("🌍 Local sector map missing. Fetching from Tushare...")
+    sector_map = fetch_sector_map()
+    
+    if sector_map:
+        try:
+            with open(SECTOR_MAP_FILE, "w", encoding="utf-8") as f:
+                json.dump(sector_map, f, ensure_ascii=False, indent=2)
+            print(f"💾 Saved sector map to {SECTOR_MAP_FILE}")
+        except Exception as e:
+            print(f"⚠️ Failed to save sector map: {e}")
+            
+    return sector_map
+
+def get_sector_performance(sector_name: str, sector_df: pd.DataFrame = None) -> float:
+    """
+    Get performance (change pct) for a specific sector
+    """
+    if not sector_name or sector_name == 'N/A':
+        return 0.0
+        
+    try:
+        if sector_df is None:
+            sector_df = fetch_sector_data()
+            
+        if sector_df is not None and not sector_df.empty:
+             row = sector_df[sector_df['板块名称'] == sector_name]
+             if not row.empty:
+                 return float(row.iloc[0]['涨跌幅'])
+    except Exception as e:
+        print(f"Error getting sector performance for {sector_name}: {e}")
+        
+    return 0.0
 
 def fetch_stock_news(symbol: str) -> str:
     """
@@ -361,13 +473,114 @@ def fetch_stock_news(symbol: str) -> str:
         return "新闻获取失败"
 
 
+def fetch_money_flow(symbol: str) -> Dict[str, Any]:
+    """
+    Fetch money flow data (Large/Super Large orders)
+    Returns dict with flow data
+    """
+    try:
+        # Get individual money flow
+        df = ak.stock_individual_fund_flow(stock=symbol, market="sh" if symbol.startswith("6") else "sz")
+        
+        if df is None or df.empty:
+            return {"status": "no_data"}
+            
+        # Get latest row
+        # Typical columns: 日期, 收盘价, 涨跌幅, 主力净流入-净额, 主力净流入-净占比, 超大单...
+        latest = df.iloc[0] # Often sorted descending by date, but check date
+        
+        # Ensure it's recent (e.g. within 3 days)
+        # AkShare usually returns history, row 0 might be latest
+        # df is sorted by date usually? Let's check docs or assume first is latest or sort
+        # Actually stock_individual_fund_flow returns historical data
+        # We need to sort by date desc
+        if '日期' in df.columns:
+            df['日期'] = pd.to_datetime(df['日期'])
+            df = df.sort_values('日期', ascending=False)
+            latest = df.iloc[0]
+            
+        return {
+            "date": latest['日期'].strftime('%Y-%m-%d'),
+            "net_amount_main": float(latest.get('主力净流入-净额', 0)), # Unit usually Yuan
+            "net_pct_main": float(latest.get('主力净流入-净占比', 0)),
+            "net_amount_super": float(latest.get('超大单净流入-净额', 0)),
+            "net_amount_large": float(latest.get('大单净流入-净额', 0)),
+            "status": "success"
+        }
+    except Exception as e:
+        print(f"⚠️ Error fetching money flow for {symbol}: {e}")
+        return {"status": "error", "message": str(e)}
+
+def fetch_dragon_tiger_data(symbol: str) -> Dict[str, Any]:
+    """
+    Fetch Dragon Tiger Board data (if available recently)
+    """
+    try:
+        # Fetch latest date for stock
+        # This API might be slow, so catch timeout
+        # ak.stock_lhb_detail_em(symbol=symbol, date=...)
+        # But we don't know the date.
+        # Use ak.stock_lhb_stock_statistic_em to see recent appearances?
+        
+        # Simpler: just check if it was on LHB recently (last 5 days)
+        end_date = datetime.now().strftime('%Y%m%d')
+        start_date = (datetime.now() - timedelta(days=5)).strftime('%Y%m%d')
+        
+        # Get LHB history
+        df = ak.stock_lhb_detail_daily_sina(symbol=symbol, date=end_date) # Sina check specific date
+        # EM interface might be better for "recent"
+        # ak.stock_lhb_detail_em requires specific date
+        
+        # Let's try getting recent LHB summary or leave it empty if complicated query needed
+        # Strategy: We skip complex LHB query for now to avoid latency,
+        # unless we have a fast API.
+        # Fallback: Return "No Data" for now, or implement if user insists.
+        # User asked for it, so we try specific date (today/yesterday)
+        
+        target_date = get_latest_trading_date()
+        df = ak.stock_lhb_detail_em(symbol=symbol, date=target_date)
+        
+        if df is None or df.empty:
+            return {"on_list": False}
+        
+        # Summarize
+        buy_total = df['买入金额'].sum() if '买入金额' in df.columns else 0
+        sell_total = df['卖出金额'].sum() if '卖出金额' in df.columns else 0
+        net_amount = buy_total - sell_total
+        
+        # Check specific seats
+        seats = df['营业部名称'].tolist() if '营业部名称' in df.columns else []
+        jg_seats = [s for s in seats if '机构专用' in s]
+        lsca_seats = [s for s in seats if '拉萨' in s] # Retail army
+        hk_seats = [s for s in seats if '深股通' in s or '沪股通' in s] # Northbound
+        
+        return {
+            "on_list": True,
+            "date": target_date,
+            "net_amount": net_amount,
+            "buy_total": buy_total,
+            "sell_total": sell_total,
+            "jg_count": len(jg_seats), # Institutions
+            "lsca_count": len(lsca_seats), # Retail
+            "hk_count": len(hk_seats), # Foreign
+            "top_seats": seats[:3] # Top 3
+        }
+        
+    except Exception as e:
+        # print(f"LHB fetch error (might not be on list): {e}")
+        return {"on_list": False}
+
 def fetch_stock_info(symbol: str) -> Optional[Dict[str, Any]]:
     """
     Fetch stock basic information by symbol
     Returns dict with keys: name, price, change_pct, etc.
-
-    Optimized version: Uses individual stock API with caching
+    Priority: Tushare -> AkShare
     """
+    # Validate symbol format (Must be at least 6 digits)
+    if not symbol or len(symbol) < 6 or not symbol.isdigit():
+        # Allow if it is a valid index starting with letters or proper format
+        if not (symbol.startswith('sh') or symbol.startswith('sz')):
+             return None
     # Trigger periodic cache cleanup
     _cleanup_expired_cache()
 
@@ -379,6 +592,26 @@ def fetch_stock_info(symbol: str) -> Optional[Dict[str, Any]]:
             print(f"✅ Using cached data for {symbol} (age: {int(current_time - cached_time)}s)")
             return cached_data
 
+    # 1. Try Tushare for Realtime
+    # Note: ts.get_realtime_quotes is legacy but works for A-shares
+    try:
+        # Check if asset is supported by Tushare realtime (Mainly Stocks)
+        # Skip Crypto/Future/Some Funds if known unsupported
+        is_crypto_future = len(symbol) > 6 and not symbol.isdigit() # Rough check
+        
+        if not is_crypto_future:
+            print(f"🔄 [DataFetcher] Attempting Tushare Realtime for: {symbol}")
+            res = fetch_stock_info_ts(symbol)
+            if res:
+                 _stock_info_cache[symbol] = (res, current_time)
+                 print(f"✅ [DataFetcher] Tushare Realtime success for {symbol}: {res['price']}")
+                 return res
+            print(f"⚠️ [DataFetcher] Tushare Realtime failed/empty for {symbol}, initiating FALLBACK...")
+    except Exception as e:
+        print(f"⚠️ [DataFetcher] Tushare Realtime error for {symbol}: {e}, initiating FALLBACK...")
+
+    # 2. Fallback to AkShare/EM/Tencent
+    print(f"🔄 [DataFetcher] Fallback: Trying AkShare Realtime for {symbol}...")
     try:
         # Method 1: Try to get individual stock/ETF realtime quote (much faster)
         # Determine if it's an ETF based on code pattern
@@ -460,38 +693,8 @@ def fetch_stock_info(symbol: str) -> Optional[Dict[str, Any]]:
                 print(f"⚠️ Stock {symbol} does not exist: {e}")
                 return None
 
-            print(f"⚠️ Fast fetch failed for {symbol}, fallback to full market data: {e}")
-
-        # Method 2: Fallback to full market data (slower but more reliable)
-        # Only used when fast method fails due to network/API issues, not when stock doesn't exist
-        print(f"🔄 Using fallback method (full market query) for {symbol}...")
-        df = ak.stock_zh_a_spot_em()
-
-        if df is None or df.empty:
-            print(f"⚠️ No stock data returned")
+            print(f"⚠️ Fast fetch failed for {symbol}: {e}")
             return None
-
-        # Try to find the stock by symbol
-        stock_row = df[df['代码'] == symbol]
-
-        if stock_row.empty:
-            print(f"⚠️ Stock {symbol} not found in real-time data")
-            return None
-
-        stock_info = stock_row.iloc[0]
-
-        result = {
-            'symbol': symbol,
-            'name': stock_info.get('名称', ''),
-            'price': float(stock_info.get('最新价', 0)) if pd.notna(stock_info.get('最新价')) else 0,
-            'change_pct': float(stock_info.get('涨跌幅', 0)) if pd.notna(stock_info.get('涨跌幅')) else 0,
-            'volume': int(stock_info.get('成交量', 0)) if pd.notna(stock_info.get('成交量')) else 0,
-            'amount': float(stock_info.get('成交额', 0)) if pd.notna(stock_info.get('成交额')) else 0
-        }
-
-        # Cache the result
-        _stock_info_cache[symbol] = (result, current_time)
-        return result
 
     except Exception as e:
         print(f"❌ Error fetching stock info for {symbol}: {e}")

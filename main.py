@@ -351,6 +351,12 @@ def process_candidates(config: Dict[str, Any], api_config: Dict[str, Any], date_
                 # Generate a purely technical report first
                 technical_summary = "__AI分析等待生成__\n\n*(请点击详情页 '生成最新分析' 按钮以获取完整AI解读)*"
                 
+                # Embedding Metadata into hidden comment for later retrieval
+                if '__metadata__' in tech_data:
+                    import json
+                    meta_json = json.dumps(tech_data['__metadata__'], ensure_ascii=False)
+                    technical_summary += f"\n<!-- METADATA: {meta_json} -->"
+
                 # Format Detail Section (Prepare full report with placeholder)
                 formatted_report = format_stock_section(stock_info, tech_data, technical_summary)
 

@@ -252,20 +252,17 @@ def detect_candlestick_patterns(df: pd.DataFrame) -> Tuple[int, list]:
     # 逻辑: 下影线 >= 实体*2, 上影线很短. 发生在回调或低位.
     is_hammer = (lower_shadow0 >= 2 * body0) and (upper_shadow0 <= 0.5 * body0)
     
-    # 简单的趋势/位置过滤: 收盘价回踩 MA20 或 MA60 附近 (或低于 MA20)
+    # Context Check (位置判断): RSI < 50 或 接近布林下轨/MA20
+    rsi = day0.get('rsi', 50)
+    boll_pos = day0.get('boll_position', 50)
     ma20 = day0.get('ma20')
-    ma60 = day0.get('ma60')
     
-    # 位置判断: 是否在支撑位附近? (比如 Price <= MA20 * 1.02)
-    is_near_support = False
-    if ma20 and low0 <= ma20 * 1.02:
-        is_near_support = True
-    elif ma60 and low0 <= ma60 * 1.02:
-        is_near_support = True
+    # Valid Context: Oversold or Near Support
+    is_valid_context = (rsi < 50) or (boll_pos < 20) or (ma20 and low0 <= ma20 * 1.02)
         
-    if is_hammer and is_near_support:
+    if is_hammer and is_valid_context:
         score_adj += 5
-        patterns.append("✨ 锤子线/金针探底 (+5)")
+        patterns.append("✨ 锤子线/金针探底 (底部确认) (+5)")
 
     # === 2. 射击之星 (Shooting Star) - 看空 [-10分] ===
     # 逻辑: 上影线 >= 实体*2, 下影线很短. 发生在高位.
@@ -314,9 +311,14 @@ def detect_candlestick_patterns(df: pd.DataFrame) -> Tuple[int, list]:
     # Day 0 (今日): 阳线, 且收盘价刺入 Day2 实体一半以上
     is_day0_bull_strong = (close0 > open0) and (close0 > (close2 + open2)/2)
     
-    if is_day2_bear and is_day1_star and is_day0_bull_strong:
+    # Context Check for Morning Star: Same as Hammer
+    rsi = day0.get('rsi', 50)
+    boll_pos = day0.get('boll_position', 50)
+    is_valid_star_context = (rsi < 50) or (boll_pos < 20) or (ma20 and low0 <= ma20 * 1.02)
+
+    if is_day2_bear and is_day1_star and is_day0_bull_strong and is_valid_star_context:
          score_adj += 10
-         patterns.append("☀️ 早晨之星 (+10)")
+         patterns.append("☀️ 早晨之星 (反转确认) (+10)")
          
     return score_adj, patterns
 
@@ -415,36 +417,39 @@ def calculate_composite_score(metrics: Dict[str, Any]) -> Tuple[int, str, list]:
     # === 动量得分 (25分) ===
     momentum_score = 0
     
-    # RSI趋势 (15分)
+    # RSI趋势 (15分) - Adjusted Logic
     rsi = get_val('rsi')
     if rsi is not None:
-        # Extend top range to 80 to catch strong momentum before overbought
+        # New Logic: 60-80 (+15), 50-60 (+10), <50 (0), >85 (0)
         if 60 <= rsi <= 80:
             momentum_score += 15
-            if rsi > 75:
-                details.append(f"🔥 RSI强势冲顶({rsi:.1f}) (+15)")
-            else:
-                details.append(f"🔥 RSI主升浪区间({rsi:.1f}) (+15)")
+            details.append(f"🔥 RSI主升浪强势区({rsi:.1f}) (+15)")
         elif 50 <= rsi < 60:
             momentum_score += 10
-            details.append(f"✅ RSI多头区间({rsi:.1f}) (+10)")
-        elif 40 <= rsi < 50:
-            momentum_score += 5
-            details.append(f"⚠️ RSI中性偏弱({rsi:.1f}) (+5)")
-        elif rsi > 80:
+            details.append(f"✅ RSI多头趋势({rsi:.1f}) (+10)")
+        elif rsi >= 85:
             momentum_score += 0
-            details.append(f"❌ RSI严重超买({rsi:.1f}) (+0)")
+            details.append(f"❌ RSI极度超买({rsi:.1f}) (+0)")
         else:
-            details.append(f"❌ RSI弱势({rsi:.1f}) (+0)")
+            # RSI < 50 or 80-85 (Neutral/Weak)
+            momentum_score += 0
+            details.append(f"⚠️ RSI弱势或回调({rsi:.1f}) (+0)")
     else:
         details.append(f"⚠️ RSI数据缺失 (+0)")
     
-    # Feature: Price Structure (10分)
+    # Feature: Price Structure & Volume Check (10分)
     price_pos = get_val('price_vs_high120')
+    vol_ratio_structure = get_val('volume_ratio')
+    
     if price_pos is not None:
         if price_pos >= 0.95:
-            momentum_score += 10
-            details.append(f"🔥 逼近前高({price_pos:.2%}) (+10)")
+            # Check for Fake Breakout (High Price + Huge Volume > 3.5)
+            if vol_ratio_structure and vol_ratio_structure > 3.5:
+                momentum_score -= 5
+                details.append(f"🛑 逼近前高但爆天量(VR:{vol_ratio_structure}) 疑似诱多 (-5)")
+            else:
+                momentum_score += 10
+                details.append(f"🔥 逼近前高({price_pos:.2%}) (+10)")
         elif price_pos >= 0.85:
             momentum_score += 5
             details.append(f"✅ 接近高点({price_pos:.2%}) (+5)")
@@ -551,21 +556,36 @@ def calculate_composite_score(metrics: Dict[str, Any]) -> Tuple[int, str, list]:
          details.append("⚠️ MA20乖离率缺失 (+0)")
     
     # 距离支撑/压力位
-    dist_support = get_val('distance_to_support')
-    dist_resistance = get_val('distance_to_resistance')
+    # 支撑位判定优化 (Support Logic)
+    # Check proximity to MA20 or Bollinger Lower Band
+    close = get_val('close')
+    ma20 = get_val('ma20')
+    boll_lower = get_val('boll_lower')
     
-    # Default to "safe" if missing (e.g. 5%)
-    d_sup = dist_support if dist_support is not None else 5
-    d_res = dist_resistance if dist_resistance is not None else 5
+    is_at_support = False
     
-    if d_sup > 3 and d_res > 3:
+    # Check MA20 Support (within 3%)
+    if close and ma20 and abs(close - ma20)/ma20 <= 0.03:
+         is_at_support = True
+         details.append("🛡️ 获MA20支撑")
+    
+    # Check Boll Lower Support (within 3%)
+    elif close and boll_lower and abs(close - boll_lower)/boll_lower <= 0.03:
+         is_at_support = True
+         details.append("🛡️ 获布林下轨支撑")
+
+    if is_at_support:
         risk_score += 5
-        details.append("✅ 远离支撑压力位 (+5)")
-    elif d_sup <= 3:
-        risk_score += 3
-        details.append("⚠️ 接近支撑位 (+3)")
+        details.append("✅ 支撑位确认 (+5)")
     else:
-        details.append("⚠️ 接近压力位 (+0)")
+        # 如果不在支撑位，检查是否远离压力位
+        dist_resistance = get_val('distance_to_resistance')
+        d_res = dist_resistance if dist_resistance is not None else 5
+        if d_res > 3:
+             risk_score += 3
+             details.append("✅ 远离压力位 (+3)")
+        else:
+             details.append("⚠️ 接近压力位 (+0)")
     
     scores.append(('风险控制', risk_score, 10))
     

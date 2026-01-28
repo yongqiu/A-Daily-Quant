@@ -85,61 +85,35 @@ def create_crypto_prompt(stock_info: Dict[str, Any], tech_data: Dict[str, Any]) 
     Create a VOLATILITY-FOCUSED prompt for CRYPTO.
     """
     print(f"Crypto: {stock_info['symbol']} - {stock_info['name']} AI Analysis")
-    prompt = f"""作为一名资深的加密货币(Crypto)交易员，请基于以下数据分析这只标的。注意：Crypto市场波动极大，且7x24小时交易。
     
-**标的：** {stock_info['symbol']} - {stock_info['name']}
-**价格：** ${tech_data['close']} (注意是美元计价)
-
-**📊 趋势指标：**
-- MA20 (均价): {tech_data['ma20']}
-- MA60 (牛熊线): {tech_data['ma60']}
-- 相对MA20位置：{'强势区' if tech_data.get('close') > tech_data.get('ma20') else '弱势区'}
-
-**📉 震荡指标：**
-- RSI (14): {tech_data.get('rsi', 'N/A')} (Crypto中，RSI>80才算极度超买，<20极度超卖)
-- 布林带位置：{tech_data.get('boll_position', 'N/A')}%
-- K线形态：{", ".join(tech_data.get('pattern_details', [])) or "无"}
-- ATR波动率：{tech_data.get('atr_pct', 'N/A')}% (注意高波动风险)
-
-**交易策略 (高波动风控)：**
-1. **趋势为王**：Crypto往往具有很强的动量效应，顺势交易优于逆势抄底。
-2. **止损纪律**：由于无涨跌停限制，必须严格设置止损 (建议ATR值的2-3倍)。
-3. **关键点位**：是否突破了近期的High/Low点？
-
-**请提供：**
-1. **当前趋势判断**：(多头趋势 / 震荡 / 空头趋势)
-2. **操作建议**：**持有** / **做多(买入)** / **减仓** / **清仓/做空** / **观望**
-3. **风控位**：给出具体的止损价格。
-
-用中文，简练直接。"""
-    return prompt
+    # Calculate derived stats for context if needed
+    # (The simple template mostly uses raw tech_data values)
+    
+    db_prompt = get_prompt_from_db('crypto_holding', {
+        'stock_info': stock_info,
+        'tech_data': tech_data
+    })
+    
+    if db_prompt:
+        return db_prompt
+        
+    return "DB Error: crypto_holding prompt not found."
 
 def create_future_prompt(stock_info: Dict[str, Any], tech_data: Dict[str, Any]) -> str:
     """
     Create a LEVERAGE-FOCUSED prompt for FUTURES.
     """
     print(f"Future: {stock_info['symbol']} - {stock_info['name']} AI Analysis")
-    prompt = f"""作为一名专业的期货(Futures)交易员，请分析以下合约。注意：期货含杠杆，风险敞口大。
     
-**合约：** {stock_info['symbol']} - {stock_info['name']}
-**最新价：** ¥{tech_data['close']}
-
-**📊 技术面：**
-- MA5: ¥{tech_data.get('ma5', 'N/A')} | MA20: ¥{tech_data['ma20']}
-- MACD信号: {tech_data['macd_signal']}
-- KDJ信号: {tech_data.get('kdj_signal', '未知')}
-
-**🛡 风控关键：**
-1. **杠杆管理**：当前波动率下，建议轻仓还是正常仓位？
-2. **日内与波段**：当前形态适合日内短打还是波段持有？
-
-**请提供：**
-1. **多空方向**：(看多 / 看空 / 震荡)
-2. **操作建议**：**开多** / **开空** / **平仓** / **观望**
-3. **关键点位**：支撑位与压力位。
-
-用中文，专业。"""
-    return prompt
+    db_prompt = get_prompt_from_db('future_holding', {
+        'stock_info': stock_info,
+        'tech_data': tech_data
+    })
+    
+    if db_prompt:
+        return db_prompt
+        
+    return "DB Error: future_holding prompt not found."
 
 
 def create_etf_holding_prompt(stock_info: Dict[str, Any], tech_data: Dict[str, Any]) -> str:
@@ -161,11 +135,57 @@ def create_etf_holding_prompt(stock_info: Dict[str, Any], tech_data: Dict[str, A
     return "DB Error: etf_holding_steady prompt not found."
 
 
+def create_speculator_prompt(stock_info: Dict[str, Any], tech_data: Dict[str, Any]) -> str:
+    """
+    Create a 'Speculator' (游资) style prompt based on DB template 'speculator_mode'.
+    """
+    # 1. Prepare Data for Computed Context
+    price = tech_data.get('close', 0)
+    
+    # Position Logic
+    ma5 = tech_data.get('ma5')
+    ma20 = tech_data.get('ma20')
+    ma5_pos = "上方" if ma5 and price > ma5 else "下方"
+    ma20_pos = "上方" if ma20 and price > ma20 else "下方"
+    
+    # Resistance/Support
+    res = tech_data.get('resistance', tech_data.get('pivot_point', price * 1.1)) # Fallback
+    sup = tech_data.get('support', tech_data.get('s1', price * 0.9))
+    
+    # Extract strengths from score_details
+    details = tech_data.get('score_details', [])
+    # Filter only "✅" items
+    strengths = [d.replace('✅ ', '') for d in details if '✅' in d]
+    strength_str = ", ".join(strengths[:3]) if strengths else "暂无明显优势"
+    
+    computed = {
+        'ma5_pos': ma5_pos,
+        'ma20_pos': ma20_pos,
+        'res': f"{res:.2f}",
+        'sup': f"{sup:.2f}",
+        'strength_str': strength_str
+    }
+    
+    db_prompt = get_prompt_from_db('speculator_mode', {
+        'stock_info': stock_info,
+        'tech_data': tech_data,
+        'computed': computed
+    })
+    
+    if db_prompt:
+        return db_prompt
+
+    return "DB Error: speculator_mode prompt not found."
+
 def create_opportunity_prompt(stock_info: Dict[str, Any], tech_data: Dict[str, Any]) -> str:
     """
     Create an OPPORTUNITY-FOCUSED prompt for STOCK CANDIDATES.
-    NOW: Tries to load from DB 'candidate_growth'.
+    NOW: Checks if 'rank_in_sector' exists to switch to Speculator Mode.
     """
+    # Auto-switch to Speculator Mode if we have enhanced data (Sector Rank)
+    if 'rank_in_sector' in tech_data:
+        return create_speculator_prompt(stock_info, tech_data)
+
     db_prompt = get_prompt_from_db('candidate_growth', {
         'stock_info': stock_info,
         'tech_data': tech_data
@@ -194,110 +214,53 @@ def create_realtime_prompt(stock_info: Dict[str, Any], history_data: Dict[str, A
     return "DB Error: realtime_intraday prompt not found."
 
 
-def create_realtime_etf_prompt(stock_info: Dict[str, Any], history_data: Dict[str, Any], realtime_data: Dict[str, Any]) -> str:
+def create_realtime_etf_prompt(stock_info: Dict[str, Any], tech_data: Dict[str, Any], realtime_data: Dict[str, Any]) -> str:
     """
     Create a REAL-TIME ACTION prompt for ETFs (Stable, long-term).
+    Now uses DB strategy 'realtime_etf_dca'.
     """
-    index_price = realtime_data.get('market_index_price', 'N/A')
-    index_change = realtime_data.get('market_index_change', 0)
+    db_prompt = get_prompt_from_db('realtime_etf_dca', {
+        'stock_info': stock_info,
+        'tech_data': tech_data,
+        'realtime_data': realtime_data
+    })
     
-    # 获取K线形态
-    pattern_details = tech_data.get('pattern_details', [])
-    pattern_str = ", ".join(pattern_details) if pattern_details else "无"
+    if db_prompt:
+        return db_prompt
 
-    prompt = f"""作为一名资产配置专家，你正在监控【ETF】实盘走势。你的风格是稳健、过滤噪音、关注大趋势。
-    
-    **一、大盘环境**
-    - 上证指数：{index_price} ({index_change}%)
-
-**二、ETF实时数据**
-- **标的**：{stock_info['name']} ({stock_info['symbol']})
-- **现价**：¥{realtime_data['price']} (涨跌: **{realtime_data['change_pct']}%**)
-- **量能**：量比 {realtime_data.get('volume_ratio', 'N/A')}
-
-**三、核心趋势线**
-- MA60 (牛熊分界)：¥{history_data.get('ma60', 'N/A')}
-- MA20 (波段支撑)：¥{history_data.get('ma20', 'N/A')}
-- K线形态：{pattern_str}
-- 当前位置：{'MA20上方 (安全)' if realtime_data['price'] > history_data.get('ma20', 0) else 'MA20下方 (注意)'} 且 {'MA60上方 (多头)' if realtime_data['price'] > history_data.get('ma60', 0) else 'MA60下方 (空头)'}
-
-**四、决策逻辑**
-1. **对于ETF，日内涨跌幅 < 1.5% 通常视为正常波动，无需操作。**
-2. 只有当价格 **有效跌破MA20** 或 **放量跌破MA60** 时，才提示减仓/避险。
-3. 如果价格回踩MA20/MA60且企稳，是良好的加仓/定投点。
-4. **切勿频繁交易**。
-
-**五、请给出指令**
-1. **【态势】**：(例如：缩量回调 / 趋势向上 / 破位下跌)
-2. **【指令】**：**【持有 (躺平)】 / 【加仓 (定投)】 / 【减仓 (止盈/避险)】 / 【观望】**
-3. **【理由】**：一句话简述理由。
-
-用中文，稳重。"""
-    return prompt
+    return "DB Error: realtime_etf_dca prompt not found."
 
 
 def create_realtime_crypto_prompt(stock_info: Dict[str, Any], history_data: Dict[str, Any], realtime_data: Dict[str, Any]) -> str:
     """
-    Create a REAL-TIME ACTION prompt for CRYPTO (24/7, High Volatility).
+    Create a REAL-TIME ACTION prompt for CRYPTO.
     """
-    prompt = f"""作为一名深耕币圈的资深交易员(Degen)，你正在进行7x24小时的实盘监控。请忽略传统金融市场的开盘收盘概念，专注于动量、情绪和关键点位。
+    db_prompt = get_prompt_from_db('realtime_crypto', {
+        'stock_info': stock_info,
+        'tech_data': history_data, # Note: history_data maps to tech_data in template
+        'realtime_data': realtime_data
+    })
+    
+    if db_prompt:
+        return db_prompt
 
-**一、标的实时状态**
-- **标的**：{stock_info['name']} ({stock_info['symbol']})
-- **现价**：${realtime_data['price']} (24h涨跌: **{realtime_data['change_pct']}%**)
-- **日内极值**：High=${realtime_data.get('high', 'N/A')} / Low=${realtime_data.get('low', 'N/A')}
-
-**二、技术趋势 (Trend Is King)**
-- **MA20 (短期趋势)**：${history_data.get('ma20', 'N/A')} ({'多头排列' if realtime_data['price'] > history_data.get('ma20', 0) else '空头压制'})
-- **MA60 (牛熊分界)**：${history_data.get('ma60', 'N/A')}
-- **ATR波动率**：{history_data.get('atr_pct', 'N/A')}% (注意：若波动率突然放大，往往意味着变盘)
-
-**三、决策逻辑 (Crypto Style)**
-1. **突破确认**：Crypto市场假突破很多。如果价格突破High点但迅速回落（插针），是看空信号。
-2. **动量效应**：强者恒强。如果24h涨幅 > 5% 且价格在高位横盘，大概率会继续拉升。
-3. **止损纪律**：合约交易必须带止损。建议止损位设在 MA20 或 ATR 下轨。
-
-**四、操作指令**
-请给出直截了当的建议：
-1. **【多空研判】**：(例如：多头趋势加速 / 震荡洗盘 / 空头破位)
-2. **【核心理由】**：(一句话解释，例如：突破关键阻力位且站稳 MA20)
-3. **【操作建议】**：**【做多 (Long)】 / 【做空 (Short)】 / 【加仓】 / 【减仓】 / 【观望】**
-4. **【风控位】**：给出具体的**止损价格**。
-
-用中文，风格干练，不要讲废话。"""
-    return prompt
+    return "DB Error: realtime_crypto prompt not found."
 
 
 def create_realtime_future_prompt(stock_info: Dict[str, Any], history_data: Dict[str, Any], realtime_data: Dict[str, Any]) -> str:
     """
-    Create a REAL-TIME ACTION prompt for FUTURES (Leverage, Risk Control).
+    Create a REAL-TIME ACTION prompt for FUTURES.
     """
-    prompt = f"""作为一名专业的期货交易员，你正在盯盘。你知道当前账户持有高杠杆头寸，**风控是第一生命线**。
+    db_prompt = get_prompt_from_db('realtime_future', {
+        'stock_info': stock_info,
+        'tech_data': history_data,
+        'realtime_data': realtime_data
+    })
+    
+    if db_prompt:
+        return db_prompt
 
-**一、盘面实时数据**
-- **合约**：{stock_info['name']} ({stock_info['symbol']})
-- **最新价**：¥{realtime_data['price']} (涨跌: **{realtime_data['change_pct']}%**)
-- **日内振幅**：High=¥{realtime_data.get('high', 'N/A')} / Low=¥{realtime_data.get('low', 'N/A')}
-
-**二、关键技术位**
-- **5日均线 (攻击线)**：¥{history_data.get('ma5', 'N/A')}
-- **20日均线 (趋势线)**：¥{history_data.get('ma20', 'N/A')}
-- **MACD信号**：{history_data.get('macd_signal', '未知')}
-
-**三、风控逻辑**
-1. **杠杆警觉**：即使只是 0.5% 的反向波动，加杠杆后也可能造成较大回撤。
-2. **顺势而为**：期货不建议逆势抄底。如果价格跌破 MA5 且无力收回，应考虑平多或开空。
-3. **日内与波段**：判断当前波动是日内杂波，还是趋势性行情的开始。
-
-**四、交易指令**
-1. **【当前状态】**：(例如：多头趋势良好 / 回调触及支撑 / 破位下跌)
-2. **【操作方向】**：**【开多】 / 【开空】 / 【平仓 (止盈/止损)】 / 【锁仓/观望】**
-3. **【关键点位】**：
-   - 压力位：¥{history_data.get('resistance', 'N/A')}
-   - 支撑位：¥{history_data.get('support', 'N/A')}
-
-用中文，专业冷静。"""
-    return prompt
+    return "DB Error: realtime_future prompt not found."
 
 
 def create_analysis_prompt(stock_info: Dict[str, Any], tech_data: Dict[str, Any], analysis_type: str = "holding", realtime_data: Dict[str, Any] = None) -> str:
@@ -319,6 +282,101 @@ def create_analysis_prompt(stock_info: Dict[str, Any], tech_data: Dict[str, Any]
             return create_realtime_etf_prompt(stock_info, tech_data, realtime_data)
         else:
             return create_realtime_prompt(stock_info, tech_data, realtime_data)
+            
+def create_deep_candidate_prompt(stock_info: Dict[str, Any], tech_data: Dict[str, Any], realtime_data: Dict[str, Any]) -> str:
+    """
+    Create a DEEP EVALUATION prompt for REAL-TIME analysis.
+    Uses DB 'deep_monitor' strategy.
+    """
+    # 1. Unpack Data and Prepare Computed Context
+    score = tech_data.get('composite_score', 0)
+    score_breakdown = tech_data.get('score_breakdown', [])
+    
+    funds = realtime_data.get('money_flow', {})
+    lhb = realtime_data.get('lhb_data', {})
+    
+    # Format Score details
+    score_str = ""
+    if score_breakdown:
+        score_str = ", ".join([f"{item}:{got}/{total}" for item, got, total in score_breakdown])
+    
+    # Format Funds
+    funds_str = "暂无数据"
+    if funds.get('status') == 'success':
+        net_main = funds.get('net_amount_main', 0) / 10000
+        net_main_str = f"{net_main:.2f}万" if abs(net_main) < 10000 else f"{net_main/10000:.2f}亿"
+        funds_str = f"主力净流入: {net_main_str} (占比{funds.get('net_pct_main', 0)}%)"
+        
+    # Format LHB
+    lhb_str = "近期未上榜"
+    if lhb.get('on_list'):
+        net = lhb.get('net_amount', 0) / 10000
+        net_str = f"{net:.2f}万" if abs(net) < 10000 else f"{net/10000:.2f}亿"
+        lhb_str = f"上榜日期: {lhb.get('date')}, 净买入: {net_str}, 机构席位: {lhb.get('jg_count')}家"
+
+    # --- Data Refinement for Prompt ---
+    # 1. Scenario Thresholds (Fix 0 value issue)
+    current_price = realtime_data.get('price', 0)
+    high_val = realtime_data.get('high', 0)
+    low_val = realtime_data.get('low', 0)
+    
+    if high_val == 0 and current_price > 0: 
+        high_val = round(current_price * 1.02, 2) # Est +2%
+    if low_val == 0 and current_price > 0:
+        low_val = round(current_price * 0.98, 2)  # Est -2%
+        
+    # 2. MA Arrangement Deduction
+    ma_str = tech_data.get('ma_arrangement', '未知')
+    if ma_str == '未知' or ma_str is None:
+        ma5 = tech_data.get('ma5')
+        ma10 = tech_data.get('ma10')
+        ma20 = tech_data.get('ma20')
+        if ma5 and ma10 and ma20:
+             if ma5 > ma10 > ma20: ma_str = "多头排列"
+             elif ma5 < ma10 < ma20: ma_str = "空头排列"
+             else: ma_str = "震荡交织"
+
+    computed = {
+        'score_str': score_str,
+        'funds_str': funds_str,
+        'lhb_str': lhb_str,
+        'high_val': high_val,
+        'low_val': low_val,
+        'ma_str': ma_str
+    }
+
+    db_prompt = get_prompt_from_db('deep_monitor', {
+        'stock_info': stock_info,
+        'tech_data': tech_data,
+        'realtime_data': realtime_data,
+        'computed': computed
+    })
+    
+    if db_prompt:
+        return db_prompt
+
+    return "DB Error: deep_monitor prompt not found."
+
+def create_analysis_prompt(stock_info: Dict[str, Any], tech_data: Dict[str, Any], analysis_type: str = "holding", realtime_data: Dict[str, Any] = None) -> str:
+    """
+    Dispatcher for prompt creation.
+    """
+    # Use explicitly configured asset_type (from config), usually 'etf' or 'stock'
+    # 'stock' is default if not specified
+    # Also support 'type' field from raw config
+    asset_type = stock_info.get('asset_type', stock_info.get('type', 'stock'))
+    is_etf = (asset_type == 'etf')
+
+    if analysis_type == "realtime":
+        if asset_type == 'crypto':
+            return create_realtime_crypto_prompt(stock_info, tech_data, realtime_data)
+        elif asset_type == 'future':
+            return create_realtime_future_prompt(stock_info, tech_data, realtime_data)
+        elif is_etf:
+            return create_realtime_etf_prompt(stock_info, tech_data, realtime_data)
+        else:
+            # Upgrade: Use Deep Candidate Prompt for Stocks
+            return create_deep_candidate_prompt(stock_info, tech_data, realtime_data)
             
     elif analysis_type == "candidate":
         # Candidates are usually stocks, but could technically be ETFs
@@ -375,7 +433,10 @@ def generate_analysis_gemini(
 
         system_instruction = "你是一名严格的风险控制官，首要任务是保护资本。"
         if analysis_type == "candidate":
-            system_instruction = "你是一名激进的成长股交易员，擅长捕捉市场热点和主升浪机会。"
+            # Check if we are in Speculator mode (implicitly via prompt content or config)
+            # But here we set system instruction.
+            # Let's set a punchy persona for candidate analysis.
+            system_instruction = "你是一名拥有20年实战经验的A股游资操盘手。你的风格是：犀利、客观、风险厌恶，只做大概率的确定性交易。"
         elif analysis_type == "realtime":
             if is_etf:
                 system_instruction = "你是一名稳健的资产配置专家，擅长ETF投资，注重长期趋势，过滤短期噪音。"
@@ -384,7 +445,8 @@ def generate_analysis_gemini(
             elif asset_type == 'future':
                 system_instruction = "你是一名专业的期货交易员，极其重视杠杆风险管理。"
             else:
-                system_instruction = "你是一名实战操盘手，你需要根据盘中实时数据给出果断、明确的操作指令，不要模棱两可。"
+                # Upgraded System Instruction for Stocks
+                system_instruction = "你是一名深谙A股主力资金运作模式的资深策略分析师。你擅长通过技术面、资金面和基本面的共振来寻找确定性机会。你的风格是：客观、犀利、重实战、不讲废话。"
         elif is_etf: # Static holding analysis for ETF
              system_instruction = "你是一名稳健的资产配置专家，擅长ETF投资。"
         elif asset_type == 'crypto':
@@ -451,7 +513,7 @@ def generate_analysis_openai(
 
         system_content = "你是一名严格的风险控制官。你的首要任务是保护资本。"
         if analysis_type == "candidate":
-            system_content = "你是一名敏锐的交易员，擅长发现强势股的买点。"
+            system_content = "你是一名拥有20年实战经验的A股游资操盘手。你的风格是：犀利、客观、风险厌恶，只做大概率的确定性交易。"
         elif analysis_type == "realtime":
             if is_etf:
                 system_content = "你是一名稳健的资产配置专家，擅长ETF投资，注重长期趋势，过滤短期噪音。"
@@ -460,7 +522,8 @@ def generate_analysis_openai(
             elif asset_type == 'future':
                 system_content = "你是一名专业的期货交易员，极其重视杠杆风险。"
             else:
-                system_content = "你是一名实战操盘手，请根据实时数据给出果断指令。"
+                # Upgraded System Instruction for Stocks
+                system_content = "你是一名深谙A股主力资金运作模式的资深策略分析师。你擅长通过技术面、资金面和基本面的共振来寻找确定性机会。你的风格是：客观、犀利、重实战、不讲废话。"
         elif is_etf: # Static holding analysis for ETF
              system_content = "你是一名稳健的资产配置专家，擅长ETF投资。"
         elif asset_type == 'crypto':

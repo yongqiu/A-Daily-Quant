@@ -1,8 +1,8 @@
-import { onMounted, onUnmounted, watch, nextTick, ref } from 'vue'
+import { onMounted, onUnmounted, watch, nextTick, ref, shallowRef } from 'vue'
 import * as echarts from 'echarts'
 
 export function useKlineChart(containerRef, selectedSymbol) {
-  const chart = ref(null)
+  const chart = shallowRef(null)
   const loading = ref(false)
 
   const initChart = () => {
@@ -32,7 +32,7 @@ export function useKlineChart(containerRef, selectedSymbol) {
       backgroundColor: 'transparent',
       animation: false,
       legend: {
-        data: ['K线', '成交量'],
+        data: ['K线', 'MA5', 'MA10', 'MA20', '成交量'],
         textStyle: { color: '#A0B4C8' },
         top: 0
       },
@@ -41,7 +41,8 @@ export function useKlineChart(containerRef, selectedSymbol) {
         axisPointer: { type: 'cross' },
         backgroundColor: 'rgba(13, 21, 38, 0.95)',
         borderColor: 'rgba(255, 255, 255, 0.1)',
-        textStyle: { color: '#F0F4F8' }
+        textStyle: { color: '#F0F4F8' },
+        valueFormatter: (value) => value ? Number(value).toFixed(2) : '-'
       },
       grid: [
         { left: '8%', right: '8%', top: '15%', height: '55%' },
@@ -106,6 +107,30 @@ export function useKlineChart(containerRef, selectedSymbol) {
           }
         },
         {
+          name: 'MA5',
+          type: 'line',
+          data: data.ma5,
+          smooth: true,
+          showSymbol: false,
+          lineStyle: { width: 1, color: '#FFD700' }
+        },
+        {
+          name: 'MA10',
+          type: 'line',
+          data: data.ma10,
+          smooth: true,
+          showSymbol: false,
+          lineStyle: { width: 1, color: '#87CEFA' }
+        },
+        {
+          name: 'MA20',
+          type: 'line',
+          data: data.ma20,
+          smooth: true,
+          showSymbol: false,
+          lineStyle: { width: 1, color: '#DA70D6' }
+        },
+        {
           name: '成交量',
           type: 'bar',
           xAxisIndex: 1,
@@ -127,12 +152,12 @@ export function useKlineChart(containerRef, selectedSymbol) {
     chart.value.setOption(option, true)
   }
 
-  const loadKlineData = async (symbol) => {
+  const loadKlineData = async (symbol, period = 'daily') => {
     if (!symbol) return
 
     loading.value = true
     try {
-      const response = await fetch(`/api/kline/${symbol}`)
+      const response = await fetch(`/api/kline/${symbol}?period=${period}`)
       const data = await response.json()
 
       if (data.status === 'success') {
@@ -150,10 +175,21 @@ export function useKlineChart(containerRef, selectedSymbol) {
     initChart()
   })
 
-  onUnmounted(() => {
+  const disposeChart = () => {
     window.removeEventListener('resize', handleResize)
     if (chart.value) {
       chart.value.dispose()
+      chart.value = null
+    }
+  }
+
+  onUnmounted(() => {
+    disposeChart()
+  })
+
+  watch(containerRef, () => {
+    if (chart.value) {
+      disposeChart()
     }
   })
 

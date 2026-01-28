@@ -146,6 +146,32 @@ def init_db():
                 cursor.execute(create_analysis_table_sql)
                 cursor.execute(create_selection_table_sql)
                 cursor.execute(create_metrics_table_sql)
+
+                # Strategies Tables
+                cursor.execute("""
+                CREATE TABLE IF NOT EXISTS strategies (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    slug VARCHAR(50) NOT NULL UNIQUE,
+                    name VARCHAR(100) NOT NULL,
+                    description VARCHAR(255),
+                    category VARCHAR(50) DEFAULT 'general',
+                    template_content TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                );
+                """)
+
+                cursor.execute("""
+                CREATE TABLE IF NOT EXISTS strategy_params (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    strategy_id INT NOT NULL,
+                    param_key VARCHAR(50) NOT NULL,
+                    param_value VARCHAR(255),
+                    description VARCHAR(255),
+                    FOREIGN KEY (strategy_id) REFERENCES strategies(id) ON DELETE CASCADE,
+                    UNIQUE KEY unique_param (strategy_id, param_key)
+                );
+                """)
             conn.commit()
             
             # --- Schema Migration for Existing DBs ---
@@ -549,6 +575,39 @@ def get_all_daily_metrics(date: str) -> Dict[str, Dict[str, Any]]:
             conn.close()
     except Exception as e:
         print(f"❌ Error fetching all daily metrics: {e}")
+        return {}
+
+def get_daily_metrics_batch(symbols: List[str], date: str) -> Dict[str, Dict[str, Any]]:
+    """
+    Get metrics for specific symbols on a specific date (Efficient Batch Query).
+    Can utilize (symbol, date) index much better than get_all.
+    """
+    if not symbols:
+        return {}
+        
+    try:
+        conn = get_connection()
+        try:
+            with conn.cursor() as cursor:
+                # Dynamically construct IN clause
+                format_strings = ','.join(['%s'] * len(symbols))
+                query = f"SELECT * FROM daily_metrics WHERE date = %s AND symbol IN ({format_strings})"
+                
+                # Params: date first, then all symbols
+                params = [date] + symbols
+                
+                cursor.execute(query, tuple(params))
+                rows = cursor.fetchall()
+                
+                result = {}
+                for row in rows:
+                    result[row['symbol']] = row
+                
+                return result
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"❌ Error fetching batch metrics: {e}")
         return {}
 
 def get_daily_metrics(symbol: str, date: str) -> Optional[Dict[str, Any]]:

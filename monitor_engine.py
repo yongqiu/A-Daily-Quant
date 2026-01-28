@@ -11,7 +11,13 @@ import requests
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 
-from data_fetcher import fetch_data_dispatcher, calculate_start_date
+from data_fetcher import (
+    fetch_data_dispatcher,
+    calculate_start_date,
+    fetch_money_flow,
+    fetch_dragon_tiger_data,
+    fetch_sector_data
+)
 from indicator_calc import calculate_indicators, get_latest_metrics
 from llm_analyst import generate_analysis
 from etf_score import apply_etf_score
@@ -82,11 +88,78 @@ def get_realtime_data(targets: List[Dict[str, Any]]) -> Dict[str, Any]:
     cryptos = [t['symbol'] for t in targets if t.get('asset_type') == 'crypto']
     futures = [t['symbol'] for t in targets if t.get('asset_type') == 'future']
     
-    # 1. Stocks/ETFs (Tencent API)
+    # 1. Stocks/ETFs
+    # Priority: Tushare > Tencent
+    
+    # Try Tushare first
+    tushare_success = False
     if stocks:
         try:
+             # Use the ts fetcher module which should handle batching if possible
+             # Since our ts fetcher currently is one-by-one or basic, we might need to
+             # implement a batch fetch here or call a helper.
+             # However, standard tushare.get_realtime_quotes supports list of symbols.
+             
+             import tushare as ts
+             # Format symbols for tushare (e.g. 600519, no sh/sz needed usually for get_realtime_quotes, or it handles attempts)
+             # Actually ts.get_realtime_quotes needs code list.
+             
+             print(f"🔄 [MonitorEngine] Batch fetching {len(stocks)} stocks via Tushare...")
+             ts_df = ts.get_realtime_quotes(stocks)
+             if ts_df is not None and not ts_df.empty:
+                 print(f"✅ [MonitorEngine] Tushare batch returned {len(ts_df)} records.")
+                 for _, row in ts_df.iterrows():
+                     symbol = row['code']
+                     # Map Tushare columns
+                     # name, price, bid, ask, volume, amount, time, pre_close...
+                     
+                     price = float(row['price'])
+                     pre_close = float(row['pre_close'])
+                     
+                     if price == 0 and pre_close > 0:
+                         price = pre_close
+                         
+                     change_pct = 0.0
+                     if pre_close > 0:
+                         change_pct = (price - pre_close) / pre_close * 100
+                         
+                     high = float(row['high'])
+                     low = float(row['low'])
+                     
+                     # Fallback for pre-market or bad data
+                     if high == 0: high = price
+                     if low == 0: low = price
+
+                     results[symbol] = {
+                         "symbol": symbol,
+                         "name": row['name'],
+                         "price": price,
+                         "pre_close": pre_close,
+                         "open": float(row['open']),
+                         "high": high,
+                         "low": low,
+                         "change_pct": round(change_pct, 2),
+                         "volume": float(row['volume']), # check unit? TS usually shares
+                         "amount": float(row['amount']),
+                         "volume_ratio": 0.0, # TS basic realtime doesn't have easy VR
+                         "asset_type": "stock" # Default
+                     }
+                 tushare_success = True
+             else:
+                 print("⚠️ [MonitorEngine] Tushare returned empty batch data.")
+        except Exception as e:
+             print(f"⚠️ [MonitorEngine] Tushare Batch Failed: {e}")
+             pass
+
+    # Fallback to Tencent if Tushare failed or missed some
+    # We check which stocks are missing from results
+    missing_stocks = [s for s in stocks if s not in results]
+    
+    if missing_stocks:
+        print(f"🔄 [MonitorEngine] FALLBACK: Fetching {len(missing_stocks)} missing stocks via Tencent...")
+        try:
             query_list = []
-            for s in stocks:
+            for s in missing_stocks:
                 prefix = ""
                 if s.startswith('6') or s.startswith('5') or s.startswith('11') or s.startswith('12'):
                     prefix = "sh" # Shanghai
@@ -106,12 +179,10 @@ def get_realtime_data(targets: List[Dict[str, Any]]) -> Dict[str, Any]:
                     if len(parts) < 30: continue
                     
                     symbol = parts[2]
-                    # Map back logic if needed, but here simple symbol matching
                     
                     price = float(parts[3])
                     pre_close = float(parts[4])
                     
-                    # Fix: If current price is 0 (e.g. pre-open, suspended), use pre_close
                     if price == 0 and pre_close > 0:
                         price = pre_close
 
@@ -129,8 +200,9 @@ def get_realtime_data(targets: List[Dict[str, Any]]) -> Dict[str, Any]:
                         "volume_ratio": float(parts[49]) if len(parts)>49 and parts[49] else 0.0,
                         "asset_type": "stock" # Default
                     }
+            print(f"✅ [MonitorEngine] Tencent fallback fetched {len(results) - (len(stocks) - len(missing_stocks))} records.")
         except Exception as e:
-            print(f"❌ Stock API Error: {e}")
+            print(f"❌ [MonitorEngine] Stock API Error (Tencent Fallback): {e}")
 
     # 2. Crypto (Binance Public API)
     for s in cryptos:
@@ -429,51 +501,72 @@ class MonitorEngine:
     def run_ai_analysis_for_target(self, symbol: str) -> str:
         """
         Run deep AI analysis for a specific target.
-        Combines History (Indicators) + Realtime Data.
+        Combines History + Realtime + Funds + Sector + Score Breakdown.
         """
-        print(f"🧠 Running AI Analysis for {symbol}...")
+        print(f"🧠 Running Deep AI Analysis for {symbol}...")
         
         # 1. Find target info
         target = next((t for t in self.targets if t['symbol'] == symbol), None)
         if not target:
-            return "Target not found"
+            # Try to construct basic target if not in list (e.g. ad-hoc analysis)
+            target = {'symbol': symbol, 'asset_type': 'stock', 'name': symbol}
             
         # 2. Get Realtime Data
-        # Must pass full target info to get_realtime_data because it needs asset_type now
         rt_dict = get_realtime_data([target])
         rt_data = rt_dict.get(symbol)
         if not rt_data:
             return "Realtime data unavailable"
             
-        # 3. Get Historical Data & Indicators
+        # 3. Get Historical Data & Indicators & Score
         try:
-            start_date = calculate_start_date(120)
-            # Use Dispatcher
+            start_date = calculate_start_date()
             df = fetch_data_dispatcher(symbol, target.get('asset_type', 'stock'), start_date)
             
             if df is None or df.empty:
                 return "Historical data unavailable"
             
             df = calculate_indicators(df)
-            tech_data = get_latest_metrics(df) # Based on yesterday close
+            tech_data = get_latest_metrics(df) # Base metrics
+            
             if not tech_data:
                 return "Indicator calculation failed"
             
             # Apply ETF-specific scoring if asset_type is 'etf'
             if target.get('asset_type') == 'etf':
                 tech_data = apply_etf_score(tech_data)
+            
+            # Ensure score details are present (indicator_calc should have them)
+            # tech_data['score_breakdown'] contains list of (item, score, max)
         except Exception as e:
             print(f"❌ Error fetching history for {symbol}: {e}")
             return f"Data Error: {str(e)}"
             
-        # 3.5 Get Market Index (Context)
+        # 4. Enhanced Data Fetching (New Dimensions)
+        # A. Market Context
         market_index = self.get_market_index()
-        
-        # Inject Market Context into realtime_data
         rt_data['market_index_price'] = market_index['price']
         rt_data['market_index_change'] = market_index['change_pct']
+        rt_data['market_index_status'] = "Strong" if market_index['change_pct'] > 0.5 else ("Weak" if market_index['change_pct'] < -0.5 else "Neutral")
+        
+        # B. Sector Data
+        # We need to match sector name. This is tricky without exact mapping.
+        # Simple attempt: fetch all sectors and try to find logic, OR just use basic sector if available in target
+        # For now, we skip precise sector name matching to avoid blocking, expecting simple sector trend if possible?
+        # Actually, let's fetch Money Flow which is more impactful for individual stock.
+        
+        # C. Money Flow & LHB
+        money_flow = fetch_money_flow(symbol)
+        lhb_data = fetch_dragon_tiger_data(symbol)
+        
+        # Inject into realtime_data or tech_data dictionary for Prompt
+        rt_data['money_flow'] = money_flow
+        rt_data['lhb_data'] = lhb_data
+        
+        # D. Basic Fundamentals (if available from source, or just rely on what we have)
+        # We have pe_ttm, mcap_float, turnover from snapshot/info if we fetched it.
+        # Some are already in tech_data/rt_data if `stock_individual_info_em` was used.
 
-        # 4. Call LLM
+        # 5. Call LLM
         # Determine provider config
         provider = self.config['api'].get('provider', 'openai')
         api_config_key = f"api_{provider}"
@@ -504,9 +597,14 @@ class MonitorEngine:
         # Pass full targets list to get_realtime_data
         realtime_data = get_realtime_data(self.targets)
         
-        # Pre-fetch daily metrics for all stocks today to show scores in list
+        # Pre-fetch daily metrics for TARGET stocks only (optimized)
         today_str = datetime.now().strftime('%Y-%m-%d')
-        daily_metrics_map = database.get_all_daily_metrics(today_str)
+        target_symbols = [t['symbol'] for t in self.targets]
+        
+        if target_symbols:
+            daily_metrics_map = database.get_daily_metrics_batch(target_symbols, today_str)
+        else:
+            daily_metrics_map = {}
         
         results = []
         for target in self.targets:

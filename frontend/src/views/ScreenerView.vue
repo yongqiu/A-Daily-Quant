@@ -276,6 +276,8 @@ import {
   XMarkIcon
 } from '@heroicons/vue/24/outline'
 
+console.log('ScreenerView: SETUP START')
+
 // State (List)
 const selections = ref([])
 const loading = ref(false)
@@ -463,8 +465,17 @@ const loadLatestAnalysis = async (symbol) => {
     analysisResult.value = ''
     try {
         const response = await apiMethods.getLatestAnalysis(symbol, activeAnalyzerTab.value)
-        if (response.status === 'success' && response.data?.html) {
-            analysisResult.value = marked.parse(response.data.html)
+        if (response.status === 'success') {
+            if (response.data?.ai_analysis) {
+                try {
+                  analysisResult.value = marked.parse(response.data.ai_analysis)
+                } catch(err) {
+                  console.error('Marked parse error', err)
+                  analysisResult.value = response.data.ai_analysis
+                }
+            } else if (response.data?.html) {
+                analysisResult.value = response.data.html
+            }
         }
     } catch (e) {
         console.error('Load latest analysis failed', e)
@@ -478,8 +489,17 @@ const loadHistoryAnalysis = async (symbol, date) => {
     analysisResult.value = ''
     try {
         const response = await apiMethods.getAnalysisHistory(symbol, date, activeAnalyzerTab.value)
-        if (response.status === 'success' && response.data?.html) {
-            analysisResult.value = marked.parse(response.data.html)
+        if (response.status === 'success') {
+            if (response.data?.ai_analysis) {
+                 try {
+                  analysisResult.value = marked.parse(response.data.ai_analysis)
+                } catch(err) {
+                  console.error('Marked parse error', err)
+                  analysisResult.value = response.data.ai_analysis
+                }
+            } else if (response.data?.html) {
+                analysisResult.value = response.data.html
+            }
         } else {
             // Fallback: If history not found, maybe show the summary from selection list?
             // Handled in template via selectedStock.ai_analysis
@@ -508,12 +528,18 @@ const runAIAnalysis = async () => {
           analysisProgress.value = data.message || data.content
         } else if (data.type === 'token') {
           accumulatedMarkdown += data.content
-          analysisResult.value = marked.parse(accumulatedMarkdown)
+          try {
+             analysisResult.value = marked.parse(accumulatedMarkdown)
+          } catch (e) { /* ignore partial parse errors */ }
         }
       },
       (data) => {
         if (data.type === 'final_html') {
-          analysisResult.value = marked.parse(data.content)
+          try {
+            analysisResult.value = marked.parse(data.content)
+          } catch(e) {
+             analysisResult.value = data.content
+          }
         }
         if (data.type === 'complete') {
           analyzing.value = false
@@ -589,6 +615,7 @@ watch(showKlineChart, (newValue) => {
 
 onMounted(() => {
   loadSelections()
+  console.log('ScreenerView: MOUNTED')
 })
 </script>
 
@@ -644,5 +671,6 @@ onMounted(() => {
 }
 .scrollbar-thin::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.2);
+  border-radius: 3px;
 }
 </style>

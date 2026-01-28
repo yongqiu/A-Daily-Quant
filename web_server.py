@@ -17,6 +17,7 @@ import subprocess
 import re
 import sys
 import json
+import pandas as pd
 from collections import deque
 from pathlib import Path
 from typing import Optional
@@ -31,9 +32,10 @@ for env_var in ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'ALL_P
 os.environ['no_proxy'] = '*'
 
 from monitor_engine import MonitorEngine
-from data_fetcher import fetch_data_dispatcher, calculate_start_date, fetch_stock_info
+from data_fetcher import fetch_data_dispatcher, calculate_start_date, fetch_stock_info, fetch_money_flow, fetch_dragon_tiger_data, load_sector_map, get_sector_performance
 from indicator_calc import calculate_indicators, get_latest_metrics # Import needed for score API
 from monitor_engine import get_realtime_data # Import needed for score API
+from etf_score import apply_etf_score # Import needed for ETF score
 import database  # Add database import
 
 app = FastAPI(title="A-Share Strategy Monitor")
@@ -183,6 +185,45 @@ async def get_holdings():
     # Enrich with latest analysis if needed, or frontend can correlate
     return holdings
 
+def refresh_market_state_from_db():
+    """Helper to sync market_state['stocks'] with DB holdings immediately"""
+    try:
+        holdings = database.get_all_holdings()
+        if not holdings:
+            market_state["stocks"] = []
+            return
+
+        # Map current prices to new list to avoid flickering 0 if possible
+        current_prices = {s['symbol']: s for s in market_state.get('stocks', [])}
+        
+        new_stocks_list = []
+        for h in holdings:
+            existing = current_prices.get(h['symbol'])
+            if existing:
+                # Update metadata but keep price/status
+                existing['name'] = h['name']
+                existing['cost_price'] = h.get('cost_price', 0)
+                existing['position_size'] = h.get('position_size', 0)
+                existing['asset_type'] = h.get('asset_type', 'stock')
+                new_stocks_list.append(existing)
+            else:
+                # New stock
+                new_stocks_list.append({
+                    "symbol": h["symbol"],
+                    "name": h["name"],
+                    "price": 0,
+                    "change_pct": 0,
+                    "type": "holding",
+                    "asset_type": h.get("asset_type", "stock"),
+                    "cost_price": h.get("cost_price", 0),
+                    "position_size": h.get("position_size", 0),
+                    "volume_ratio": 0,
+                    "status": "等待监控开启"
+                })
+        market_state["stocks"] = new_stocks_list
+    except Exception as e:
+        print(f"Error refreshing market state: {e}")
+
 @app.post("/api/holdings")
 async def add_holding(holding: HoldingBase):
     """Add a new holding"""
@@ -200,6 +241,7 @@ async def add_holding(holding: HoldingBase):
     )
     if success:
         monitor_engine.refresh_targets()
+        refresh_market_state_from_db()
         return {"status": "success", "message": f"Added {holding.symbol}"}
     else:
         raise HTTPException(status_code=400, detail="Failed to add holding (already exists?)")
@@ -214,6 +256,7 @@ async def update_holding(symbol: str, holding: HoldingUpdate):
     )
     if success:
         monitor_engine.refresh_targets()
+        refresh_market_state_from_db()
         return {"status": "success", "message": f"Updated {symbol}"}
     else:
         raise HTTPException(status_code=400, detail="Failed to update holding")
@@ -224,6 +267,7 @@ async def delete_holding(symbol: str):
     success = database.remove_holding(symbol)
     if success:
         monitor_engine.refresh_targets()
+        refresh_market_state_from_db()
         return {"status": "success", "message": f"Removed {symbol}"}
     else:
         raise HTTPException(status_code=404, detail="Holding not found")
@@ -307,8 +351,11 @@ async def analyze_stock(symbol: str, background_tasks: BackgroundTasks):
     return {"status": "started", "message": f"🤖 AI正在分析 {symbol}，请稍候..."}
 
 @app.get("/api/kline/{symbol}")
-async def get_kline_data(symbol: str):
-    """Fetch K-line data for charts"""
+async def get_kline_data(symbol: str, period: str = 'daily'):
+    """
+    Fetch K-line data for charts
+    Period: daily, weekly, monthly
+    """
     # 1. Find the target to know its asset type
     target = next((t for t in monitor_engine.targets if t['symbol'] == symbol), None)
     
@@ -320,30 +367,40 @@ async def get_kline_data(symbol: str):
     # [Date, Open, Close, Low, High, Volume]
     
     try:
-        days = 120
-        # If asset_type is crypto, data_fetcher might need tuning or use separate calls,
-        # but fetch_data_dispatcher handles it.
+        # Determine days based on period
+        days_map = {'daily': 365, 'weekly': 365, 'monthly': 730}
+        days = days_map.get(period, 365)
         
         start_date = calculate_start_date(days)
-        df = fetch_data_dispatcher(symbol, asset_type, start_date)
+        
+        # Pass period to dispatcher
+        df = fetch_data_dispatcher(symbol, asset_type, start_date, period=period)
         
         if df is None or df.empty:
             return {"status": "error", "message": "No data found"}
             
-        # Format for ECharts (Category Axis + Data Series)
-        # categoryData: ['2023-01-01', ...]
-        # values: [[open, close, low, high, vol], ...]
+        # Calc MAs (Simple Moving Averages)
+        # Using rolling window
+        df['ma5'] = df['close'].rolling(window=5).mean()
+        df['ma10'] = df['close'].rolling(window=10).mean()
+        df['ma20'] = df['close'].rolling(window=20).mean()
+        df['ma30'] = df['close'].rolling(window=30).mean()
         
-        dates = df['date'].dt.strftime('%Y-%m-%d').tolist()
-        
-        # ECharts Candle Format: [Open, Close, Lowest, Highest]
-        # Our DF: open, close, high, low
-        # Note order!
+        # Fill NaN with None for charts (ECharts handles '-' or null better)
+        # Replacing in-place safely using object type to allow None
+        df = df.astype(object)
+        df = df.where(pd.notnull(df), None)
+            
+        dates = df['date'].apply(lambda x: x.strftime('%Y-%m-%d') if pd.notnull(x) else '').tolist()
         
         values = []
         volumes = []
+        ma5 = []
+        ma10 = []
+        ma20 = []
+        ma30 = []
         
-        # Iteration is slow for huge data but 120 rows is fine
+        # Iteration
         for _, row in df.iterrows():
             values.append([
                 row['open'],
@@ -352,14 +409,24 @@ async def get_kline_data(symbol: str):
                 row['high']
             ])
             volumes.append(row['volume'])
+            # Explicitly check for None (NaNs were replaced by None above)
+            ma5.append(row['ma5'])
+            ma10.append(row['ma10'])
+            ma20.append(row['ma20'])
+            ma30.append(row['ma30'])
             
         return {
             "status": "success",
             "symbol": symbol,
             "name": target['name'] if target else symbol,
+            "period": period,
             "dates": dates,
             "values": values,
-            "volumes": volumes
+            "volumes": volumes,
+            "ma5": ma5,
+            "ma10": ma10,
+            "ma20": ma20,
+            "ma30": ma30
         }
         
     except Exception as e:
@@ -535,17 +602,19 @@ async def calculate_stock_score(symbol: str):
             # Try fetch basic info if not in holdings
             basic_info = fetch_stock_info(symbol)
             if basic_info:
+                 # Auto-detect asset type for ETF
+                 is_etf = symbol.startswith(('51', '159', '56', '58', '50'))
                  stock_info = {
                      'symbol': symbol,
                      'name': basic_info.get('name', symbol),
-                     'asset_type': 'stock',
+                     'asset_type': 'etf' if is_etf else 'stock',
                      'cost_price': None
                  }
             else:
                 return JSONResponse(status_code=404, content={"message": f"未找到股票 {symbol} 的信息"})
 
         # 2. Fetch History & Calculate Indicators
-        start_date = calculate_start_date(120)
+        start_date = calculate_start_date()
         asset_type = stock_info.get('asset_type', 'stock')
         df = fetch_data_dispatcher(symbol, asset_type, start_date)
         
@@ -568,7 +637,11 @@ async def calculate_stock_score(symbol: str):
              # Note: Recalculating MA/RSI with realtime price is complex without full timeseries update,
              # so we usually accept 'latest close' means 'yesterday close' + 'current price' displayed
              # But for storing metrics, we might want to store the snapshot.
-             
+        
+        # Apply ETF Score logic if it is an ETF
+        if asset_type == 'etf':
+            latest = apply_etf_score(latest)
+
         # 5. Save to daily_metrics
         today = datetime.now().strftime('%Y-%m-%d')
         latest['symbol'] = symbol
@@ -662,7 +735,9 @@ async def analyze_stock_report_stream(symbol: str, mode: str = "multi_agent"):
                  tech_data = db_metrics
                  tech_data['close'] = float(db_metrics['price'] or 0)
                  tech_data['ma20'] = float(db_metrics['ma20'] or 0)
-                 tech_data['score'] = db_metrics['composite_score']
+                 tech_data['composite_score'] = db_metrics.get('composite_score', 0)
+                 tech_data['score_breakdown'] = db_metrics.get('score_breakdown', [])
+                 
                  # We still need realtime index data for context
                  monitor_engine_conf = monitor_engine.load_config()
                  index_data = monitor_engine.get_market_index()
@@ -679,7 +754,7 @@ async def analyze_stock_report_stream(symbol: str, mode: str = "multi_agent"):
                 yield f"data: {json.dumps({'type': 'progress', 'value': 10, 'message': '📉 正在下载历史K线数据(120天)...'})}\n\n"
                 
                 # Fetch History
-                start_date = calculate_start_date(120)
+                start_date = calculate_start_date()
                 asset_type = stock_info.get('asset_type', 'stock')
                 df = fetch_data_dispatcher(symbol, asset_type, start_date)
                 
@@ -705,10 +780,43 @@ async def analyze_stock_report_stream(symbol: str, mode: str = "multi_agent"):
                     yield f"data: {json.dumps({'type': 'error', 'content': '实时数据获取失败'})}\n\n"
                     return
             
-            # Common Logic
+            # Common Logic: Enhanced Data Fetching
             # Inject Market Context
             rt_data['market_index_price'] = index_data.get('price')
             rt_data['market_index_change'] = index_data.get('change_pct')
+            rt_data['market_index_status'] = "Strong" if index_data.get('change_pct', 0) > 0.5 else ("Weak" if index_data.get('change_pct', 0) < -0.5 else "Neutral")
+            
+            # --- Inject Sector Info ---
+            # Single stock analysis might miss sector flow used in screener, so we hydrate it here.
+            sector_map = load_sector_map()
+            sector_name = sector_map.get(symbol, 'N/A')
+            
+            # If not in map, maybe we can fetch it or leave N/A
+            rt_data['sector'] = sector_name
+            tech_data['sector'] = sector_name
+            
+            if sector_name and sector_name != 'N/A':
+                 sector_change = get_sector_performance(sector_name)
+                 rt_data['sector_change'] = sector_change
+                 tech_data['sector_change'] = sector_change
+            else:
+                 rt_data['sector_change'] = 0
+                 tech_data['sector_change'] = 0
+                 
+            # Rank is hard to calc on the fly without full market scan, set 'N/A' (or '未知' in prompt)
+            tech_data['rank_in_sector'] = 'N/A'
+            rt_data['rank_in_sector'] = 'N/A'
+            
+            # Fetch Funds & LHB (regardless of fast/slow path)
+            yield f"data: {json.dumps({'type': 'progress', 'value': 28, 'message': '💸 正在分析资金流向与龙虎榜...'})}\n\n"
+            
+            # These are fast enough usually, or maybe we fetch them asynchronously?
+            # For simplicity, sequential here.
+            money_flow = fetch_money_flow(symbol)
+            lhb_data = fetch_dragon_tiger_data(symbol)
+            
+            rt_data['money_flow'] = money_flow
+            rt_data['lhb_data'] = lhb_data
             
             yield f"data: {json.dumps({'type': 'step', 'content': '✅ 数据准备就绪，进入AI分析阶段'})}\n\n"
 
@@ -751,10 +859,16 @@ async def analyze_stock_report_stream(symbol: str, mode: str = "multi_agent"):
                                 
                             today = datetime.now().strftime('%Y-%m-%d')
                             
-                            # Try save strictly as holding analysis first
-                            success = database.save_holding_analysis(symbol, today, analysis_data, mode=mode)
+                            # Check if it is actually in holdings to avoid Foreign Key Error
+                            is_holding = any(h['symbol'] == symbol for h in holdings)
                             
-                            # If fails (e.g. FK constraint because not in holdings), try save as selection update
+                            if is_holding:
+                                # Try save strictly as holding analysis first
+                                success = database.save_holding_analysis(symbol, today, analysis_data, mode=mode)
+                            else:
+                                success = False
+                            
+                            # If not a holding or save failed, try save as selection update
                             if not success:
                                 # We assume it might be a candidate being analyzed on the fly
                                 # Check if it exists in daily_selections for today
@@ -768,15 +882,7 @@ async def analyze_stock_report_stream(symbol: str, mode: str = "multi_agent"):
                                         'close_price': analysis_data['price'],
                                         'volume_ratio': current_selection.get('volume_ratio', 0),
                                         'composite_score': analysis_data['composite_score'],
-                                        'ai_analysis': accumulated_html # Store HTML or Markdown? Usually DB stores what's passed. Here accumulated_html is HTML from agent.
-                                        # Wait, agent returns HTML. selections table expects markdown usually?
-                                        # Actually in main.py we save markdown.
-                                        # But here 'final_html' is HTML.
-                                        # Ideally we should save Markdown.
-                                        # Agent system yields Markdown in chunks but final_html is converted.
-                                        # We should probably save the raw markdown if possible.
-                                        # But let's stick to HTML string if that's what we have, or fix agent to return markdown.
-                                        # For now, saving HTML in ai_analysis column is acceptable if frontend handles it.
+                                        'ai_analysis': accumulated_html # Store HTML or Markdown? Agent returns MIXED content (HTML for agents, MD for CIO).
                                     }
                                     database.save_daily_selection(today, selection_update)
                                     
@@ -827,8 +933,46 @@ async def analyze_stock_report_stream(symbol: str, mode: str = "multi_agent"):
                 if analysis_data['price'] == 0 and tech_data.get('close') and tech_data.get('close') > 0:
                     analysis_data['price'] = tech_data['close']
 
-                database.save_holding_analysis(symbol, datetime.now().strftime('%Y-%m-%d'), analysis_data, mode=mode)
+                today = datetime.now().strftime('%Y-%m-%d')
                 
+                # Check if it is actually in holdings to avoid Foreign Key Error
+                is_holding = any(h['symbol'] == symbol for h in holdings)
+                
+                if is_holding:
+                    success = database.save_holding_analysis(symbol, today, analysis_data, mode=mode)
+                else:
+                    success = False
+                
+                if not success:
+                    # Fallback: Try saving to daily_selections if not in holdings (Candidate Mode)
+                    try:
+                        print(f"⚠️ {symbol} not in holdings, attempting to save to daily_selections...")
+                        # Try today first
+                        current_sel = database.get_daily_selection(symbol, today)
+                        target_date = today
+                        
+                        # If not in today's list, try finding the latest entry (e.g. from yesterday)
+                        if not current_sel:
+                            current_sel = database.get_daily_selection(symbol, None)
+                            if current_sel:
+                                target_date = current_sel['selection_date']
+                        
+                        if current_sel:
+                            sel_update = {
+                                'symbol': symbol,
+                                'name': current_sel.get('name', stock_info.get('name', '')),
+                                'close_price': analysis_data['price'],
+                                'volume_ratio': current_sel.get('volume_ratio', 0),
+                                'composite_score': analysis_data['composite_score'],
+                                'ai_analysis': formatted
+                            }
+                            database.save_daily_selection(target_date, sel_update)
+                            print(f"✅ Saved candidate analysis (fallback) for {symbol} on {target_date}")
+                        else:
+                             print(f"⚠️ {symbol} not found in any daily selections, analysis not saved to DB.")
+                    except Exception as save_e:
+                        print(f"❌ Failed to save fallback analysis: {save_e}")
+
                 yield f"data: {json.dumps({'type': 'progress', 'value': 100, 'message': '分析完成'})}\n\n"
                 yield f"data: {json.dumps({'type': 'result', 'content': formatted})}\n\n"
                 yield f"data: {json.dumps({'type': 'final_html', 'content': html})}\n\n"
@@ -889,7 +1033,7 @@ async def analyze_stock_realtime(symbol: str, background_tasks: BackgroundTasks)
                     return
 
             # 2. Fetch historical context (need technical anchors like MA20, MA60)
-            start_date = calculate_start_date(120)
+            start_date = calculate_start_date()
             asset_type = stock_info.get('asset_type', 'stock')
             df = fetch_data_dispatcher(symbol, asset_type, start_date)
             
@@ -991,7 +1135,7 @@ async def generate_single_stock_report(symbol: str, background_tasks: Background
                 return
 
             # 2. Fetch historical data
-            start_date = calculate_start_date(120)
+            start_date = calculate_start_date()
             asset_type = stock_info.get('asset_type', 'stock')
             df = fetch_data_dispatcher(symbol, asset_type, start_date)
 
@@ -1160,7 +1304,11 @@ async def get_analysis_history(symbol: str, date: str = None, mode: str = 'multi
             
             selection = database.get_daily_selection(symbol, selection_date=date)
             if selection:
-                html_result = markdown.markdown(selection['ai_analysis'], extensions=['tables', 'fenced_code'])
+                # ai_analysis might be HTML already (if from multi-agent) or Markdown (if from candidate analysis)
+                content = selection['ai_analysis']
+                is_html_likely = content.strip().startswith('<') or "div" in content or "span" in content
+                
+                html_result = content if is_html_likely else markdown.markdown(content, extensions=['tables', 'fenced_code'])
                  
                 return {
                     "status": "success",
@@ -1172,7 +1320,7 @@ async def get_analysis_history(symbol: str, date: str = None, mode: str = 'multi
                         "ma20": 0, # Not stored in selections table directly
                         "trend_signal": "Candidate",
                         "composite_score": selection['composite_score'],
-                        "ai_analysis": selection['ai_analysis'],
+                        "ai_analysis": content,
                         "html": html_result,
                         "mode": "candidate"
                     }
@@ -1233,7 +1381,7 @@ async def analyze_candidate_stock(symbol: str, background_tasks: BackgroundTasks
             }
 
             # 2. Fetch historical data
-            start_date = calculate_start_date(120)
+            start_date = calculate_start_date()
             asset_type = stock_info.get('asset_type', 'stock')
             df = fetch_data_dispatcher(symbol, asset_type, start_date)
 
@@ -1250,10 +1398,59 @@ async def analyze_candidate_stock(symbol: str, background_tasks: BackgroundTasks
 
             # 4. Get latest historical metrics (基于昨日收盘价的技术指标)
             latest = get_latest_metrics(df, cost_price=None)
+            
+            # --- 4.5 Try to recover metadata from daily_selections (rank, mood, etc) ---
+            from database import get_daily_selection
+            
+            # Try today or recent
+            selection_record = get_daily_selection(symbol, None)
+            if selection_record and selection_record.get('ai_analysis'):
+                import re
+                import json
+                
+                # Check for hidden metadata
+                # Format: <!-- METADATA: {"rank_in_sector": 5, ...} -->
+                match = re.search(r'<!-- METADATA: (.*?) -->', selection_record['ai_analysis'])
+                if match:
+                    try:
+                        meta_str = match.group(1)
+                        metadata = json.loads(meta_str)
+                        print(f"💡 Recovered metadata for {symbol}: {metadata.keys()}")
+                        
+                        # Merge into latest metrics
+                        for k, v in metadata.items():
+                            latest[k] = v
+                    except Exception as meta_e:
+                        print(f"⚠️ Failed to parse metadata: {meta_e}")
 
             # 5. Get realtime price (获取实时价格)
             realtime_dict = get_realtime_data([stock_info])
             realtime_data = realtime_dict.get(symbol)
+            
+            # --- 5.1 Inject Sector Data (Fix for missing data in Candidate Prompt) ---
+            try:
+                sector_map = load_sector_map()
+                sector_name = sector_map.get(symbol, 'N/A')
+                
+                if realtime_data:
+                    realtime_data['sector'] = sector_name
+                    # Also inject into latest for consistency if needed, but Prompt uses realtime_data usually for sector
+                    latest['sector'] = sector_name
+                    
+                    if sector_name != 'N/A':
+                         # Using the imported get_sector_performance
+                         sector_change = get_sector_performance(sector_name)
+                         realtime_data['sector_change'] = sector_change
+                         latest['sector_change'] = sector_change
+                    else:
+                         realtime_data['sector_change'] = 0
+                         latest['sector_change'] = 0
+                    
+                    # Rank logic (Placeholder for now as expensive calc is skipped)
+                    realtime_data['rank_in_sector'] = 'N/A'
+                    latest['rank_in_sector'] = 'N/A'
+            except Exception as sec_e:
+                print(f"⚠️ Sector fetch failed for {symbol}: {sec_e}")
 
             # 6. Update latest with realtime price if available
             if realtime_data and realtime_data.get('price'):

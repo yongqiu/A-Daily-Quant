@@ -8,6 +8,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import akshare as ak
 import time
 
+from data_fetcher_ts import get_pro_client
+
 def get_market_snapshot_tencent() -> pd.DataFrame:
     """
     Get real-time snapshot of all A-share stocks using Tencent Interface.
@@ -17,14 +19,31 @@ def get_market_snapshot_tencent() -> pd.DataFrame:
     
     # 1. Get all codes (stable akshare API for static info)
     # This might fail if EM interface is completely down, but usually code list is cacheable
+    codes = []
     try:
         codes_df = ak.stock_info_a_code_name()
+        if codes_df is not None and not codes_df.empty:
+            codes = codes_df['code'].tolist()
     except Exception as e:
-        print(f"❌ Failed to get code list from AkShare: {e}")
+        print(f"⚠️ Failed to get code list from AkShare: {e}")
+        
+    # Fallback: Tushare
+    if not codes:
+        print("🔄 Falling back to Tushare for code list...")
+        try:
+            pro = get_pro_client()
+            if pro:
+                df_ts = pro.stock_basic(exchange='', list_status='L', fields='symbol')
+                if df_ts is not None and not df_ts.empty:
+                     codes = df_ts['symbol'].tolist()
+                     print(f"✅ Recovered {len(codes)} codes from Tushare.")
+        except Exception as e:
+            print(f"❌ Failed to get code list from Tushare: {e}")
+
+    if not codes:
+        print("❌ Critical: Could not fetch stock code list from any source.")
         return pd.DataFrame()
         
-    codes = codes_df['code'].tolist()
-    
     # 2. Format codes for TX API (sh prefix for 60/68, sz for 00/30, bj for 4/8/9)
     tx_codes = []
     for c in codes:
