@@ -1045,7 +1045,179 @@ class AkshareFetcher(BaseFetcher):
         except Exception as e:
             logger.error(f"[API错误] 获取 {stock_code} 筹码分布失败: {e}")
             return None
+
+    def get_stock_news(self, stock_code: str) -> Optional[List[Dict[str, str]]]:
+        """
+        获取个股新闻资讯 (东方财富)
+        
+        数据来源: ak.stock_news_em(symbol=code)
+        
+        Returns:
+             List of dicts: [
+                {'title': '...', 'content': '...', 'date': '...', 'url': '...'},
+                ...
+             ]
+        """
+        import akshare as ak
+        
+        # News not supported for indexes/ETFs/US/HK in this specific API usually, 
+        # but let's try for A-shares primarily.
+        
+        try:
+             # 防封禁策略 (Lightweight)
+            self._set_random_user_agent()
+            # News is less critical than price, but still needs rate limit
+            self._enforce_rate_limit()
+
+            logger.info(f"[API调用] ak.stock_news_em(symbol={stock_code}) 获取个股新闻...")
+            import time as _time
+            api_start = _time.time()
+            
+            df = ak.stock_news_em(symbol=stock_code)
+            
+            api_elapsed = _time.time() - api_start
+            
+            if df is None or df.empty:
+                 logger.warning(f"[API返回] ak.stock_news_em 返回空数据, 耗时 {api_elapsed:.2f}s")
+                 return []
+
+            # 东方财富新闻列名: '关键词', '新闻标题', '新闻内容', '发布时间', '文章来源', '新闻链接'
+            news_list = []
+            # Take top 5 most recent
+            for _, row in df.head(5).iterrows():
+                item = {
+                    'title': str(row.get('新闻标题', '')),
+                    'content': str(row.get('新闻内容', '')),
+                    'date': str(row.get('发布时间', '')),
+                    'url': str(row.get('新闻链接', '')),
+                    'source': str(row.get('文章来源', ''))
+                }
+                news_list.append(item)
+            
+            logger.info(f"[API返回] ak.stock_news_em 成功: 获取 {len(news_list)} 条新闻")
+            return news_list
+
+        except Exception as e:
+            logger.error(f"[API错误] 获取 {stock_code} 新闻失败: {e}")
+            return []
+
     
+    def fetch_financial_report(self, stock_code: str) -> Optional[Dict[str, Any]]:
+        """
+        获取财务报表摘要（用于基本面分析）
+        
+        数据来源：ak.stock_financial_abstract
+        
+        Args:
+            stock_code: 股票代码
+            
+        Returns:
+            Dict: 包含营收、净利润、扣非净利润等关键指标的历史对比
+        """
+        import akshare as ak
+        
+        # 防封禁
+        self._set_random_user_agent()
+        self._enforce_rate_limit()
+        
+        try:
+            logger.info(f"[API调用] ak.stock_financial_abstract(symbol={stock_code})")
+            df = ak.stock_financial_abstract(symbol=stock_code)
+            
+            if df is None or df.empty:
+                logger.warning(f"[API返回] 财务数据为空: {stock_code}")
+                return None
+                
+            # 数据清洗与提取
+            # df columns: 选项, 指标, 20241231, ...
+            
+            # 过滤不需要的列 '选项'
+            if '选项' in df.columns:
+                df = df.drop(columns=['选项'])
+            
+            # 设置 '指标' 为索引
+            if '指标' in df.columns:
+                df = df.set_index('指标')
+            
+            # 选取最近的 4 个报告期
+            # 注意：列名可能是数字还是字符串，如果是 akshare 新版可能是 pd.Timestamp
+            # 但 ak.stock_financial_abstract 通常返回字符串列名
+            recent_cols = df.columns[:4]
+            
+            result = {}
+            for date_col in recent_cols:
+                # 构建该报告期的数据字典
+                period_data = df[date_col].to_dict()
+                result[str(date_col)] = period_data
+                
+            return {
+                "dates": [str(c) for c in recent_cols],
+                "data": result,
+                "latest_date": str(recent_cols[0]) if len(recent_cols) > 0 else ""
+            }
+            
+        except Exception as e:
+            logger.error(f"[API错误] 获取财务数据失败 {stock_code}: {e}")
+            return None
+
+    def fetch_money_flow(self, stock_code: str) -> Dict[str, Any]:
+        """
+        获取个股资金流向（用于技术面分析）
+        
+        数据来源：ak.stock_individual_fund_flow
+        
+        Args:
+            stock_code: 股票代码
+        
+        Returns:
+            Dict: 包含主力净流入、超大单等数据
+        """
+        import akshare as ak
+        import pandas as pd
+        
+        self._set_random_user_agent()
+        self._enforce_rate_limit()
+        
+        try:
+            # 判断市场
+            market = "sh" if stock_code.startswith(('6', '5', '9')) else "sz"
+            
+            logger.info(f"[API调用] ak.stock_individual_fund_flow(stock={stock_code}, market={market})")
+            df = ak.stock_individual_fund_flow(stock=stock_code, market=market)
+            
+            if df is None or df.empty:
+                return {"status": "no_data"}
+                
+            # AkShare 返回的是历史数据，按日期降序或升序？通常是升序，所以最后一行是最新
+            # 检查日期排序
+            if '日期' in df.columns:
+                df['日期'] = pd.to_datetime(df['日期'])
+                df = df.sort_values('日期', ascending=False)
+                latest = df.iloc[0]
+            else:
+                # 假设反回的一定有数据且最后一行是最新的（或者第一行？）
+                # stock_individual_fund_flow 历史接口通常返回所有历史
+                # 排序后再取
+                latest = df.iloc[-1] 
+
+            # 提取数据
+            return {
+                "date": latest['日期'].strftime('%Y-%m-%d') if '日期' in latest else "",
+                "net_amount_main": float(latest.get('主力净流入-净额', 0)), # 元
+                "net_pct_main": float(latest.get('主力净流入-净占比', 0)),
+                "net_amount_super": float(latest.get('超大单净流入-净额', 0)),
+                "net_amount_large": float(latest.get('大单净流入-净额', 0)),
+                "net_amount_middle": float(latest.get('中单净流入-净额', 0)),
+                "net_amount_small": float(latest.get('小单净流入-净额', 0)),
+                "close": float(latest.get('收盘价', 0)),
+                "change_pct": float(latest.get('涨跌幅', 0)),
+                "status": "success"
+            }
+            
+        except Exception as e:
+            logger.error(f"[API错误] 获取资金流向失败 {stock_code}: {e}")
+            return {"status": "error", "message": str(e)}
+
     def get_enhanced_data(self, stock_code: str, days: int = 60) -> Dict[str, Any]:
         """
         获取增强数据（历史K线 + 实时行情 + 筹码分布）

@@ -16,7 +16,11 @@ from data_fetcher import (
     calculate_start_date,
     fetch_money_flow,
     fetch_dragon_tiger_data,
-    fetch_sector_data
+    fetch_money_flow,
+    fetch_dragon_tiger_data,
+    fetch_sector_data,
+    load_sector_map,
+    get_sector_performance
 )
 from indicator_calc import calculate_indicators, get_latest_metrics
 from llm_analyst import generate_analysis
@@ -549,11 +553,27 @@ class MonitorEngine:
         rt_data['market_index_status'] = "Strong" if market_index['change_pct'] > 0.5 else ("Weak" if market_index['change_pct'] < -0.5 else "Neutral")
         
         # B. Sector Data
-        # We need to match sector name. This is tricky without exact mapping.
-        # Simple attempt: fetch all sectors and try to find logic, OR just use basic sector if available in target
-        # For now, we skip precise sector name matching to avoid blocking, expecting simple sector trend if possible?
-        # Actually, let's fetch Money Flow which is more impactful for individual stock.
+        # We need to match sector name.
+        if 'sector' not in target:
+             # Try to load map
+             sector_map = load_sector_map()
+             if sector_map and symbol in sector_map:
+                 target['sector'] = sector_map[symbol]
         
+        sector_name = target.get('sector', 'N/A')
+        sector_change = 0.0
+        
+        if sector_name and sector_name != 'N/A':
+            sector_change = get_sector_performance(sector_name)
+            
+        rt_data['sector'] = sector_name
+        rt_data['sector_change'] = sector_change
+        
+        # Calculate Rank if feasible (Optional, maybe too slow for realtime single target?)
+        # For now, we leave rank as default N/A or rely on tech_data having it if we ran a full screen recently.
+        if 'rank_in_sector' not in rt_data:
+             rt_data['rank_in_sector'] = tech_data.get('rank_in_sector', 'N/A')
+
         # C. Money Flow & LHB
         money_flow = fetch_money_flow(symbol)
         lhb_data = fetch_dragon_tiger_data(symbol)

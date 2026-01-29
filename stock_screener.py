@@ -11,8 +11,9 @@ from data_fetcher import fetch_stock_data, calculate_start_date, fetch_sector_da
 
 from data_fetcher_tx import get_market_snapshot_tencent
 from indicator_calc import calculate_indicators, get_latest_metrics
+from indicator_calc import calculate_indicators, get_latest_metrics
 from data_provider.base import DataFetcherManager
-from strategies.trend_strategy import StockTrendAnalyzer
+from scoring_service import calculate_comprehensive_score
 import database
 import json
 import os
@@ -350,8 +351,9 @@ def analyze_candidate(candidate: Dict[str, Any], config: Dict[str, Any]) -> Dict
     # Calculate indicators
     df = calculate_indicators(df)
     
-    # Get latest metrics
-    tech_data = get_latest_metrics(df)
+    # === Refactored: Use Unified Scoring Service ===
+    # This replaces get_latest_metrics + StockTrendAnalyzer logic
+    tech_data = calculate_comprehensive_score(df, symbol, cost_price=0.0, asset_type='stock')
     
     if not tech_data:
         return None
@@ -369,7 +371,7 @@ def analyze_candidate(candidate: Dict[str, Any], config: Dict[str, Any]) -> Dict
     ]
     
     # Store critical metadata in a special dict to be embedded later
-    tech_data['__metadata__'] = {}
+    # Note: calculate_comprehensive_score ensures __metadata__ exists
     
     for key in transfer_keys:
         if key in candidate:
@@ -380,20 +382,54 @@ def analyze_candidate(candidate: Dict[str, Any], config: Dict[str, Any]) -> Dict
     # We'll attach news to the tech_data so LLM can read it
     tech_data['latest_news'] = fetch_stock_news(symbol)
 
-    # === Integration: Trend Strategy Score ===
-    try:
-        trend_analyzer = StockTrendAnalyzer()
-        trend_result = trend_analyzer.analyze(df, symbol)
-        tech_data['trend_score'] = trend_result.signal_score
-        tech_data['trend_signal'] = trend_result.buy_signal.value
-        # Add to metadata for viewing
-        tech_data['__metadata__']['trend_score'] = trend_result.signal_score
-        tech_data['__metadata__']['trend_signal'] = trend_result.buy_signal.value
-        tech_data['composite_score'] = (tech_data['composite_score'] + trend_result.signal_score) / 2 # Average them for now
-    except Exception as e:
-        print(f"   ⚠️ Trend Analysis failed: {e}")
-
     return tech_data
+
+def print_detailed_metrics(metrics: Dict[str, Any]):
+    """
+    Print detailed metrics and scoring breakdown for a stock
+    """
+    try:
+        print(f"\n   --- DETAILED ANALYSIS: {metrics.get('name', 'Unknown')} ({metrics.get('symbol', '')}) ---")
+        
+        # Group by category for clarity
+        categories = {
+            "Trend": ['ma5', 'ma10', 'ma20', 'ma60', 'ma_arrangement', 'trend_signal'],
+            "MACD": ['macd_dif', 'macd_dea', 'macd_hist', 'macd_signal'],
+            "RSI": ['rsi', 'rsi_signal'],
+            "KDJ": ['kdj_k', 'kdj_d', 'kdj_j', 'kdj_signal', 'kdj_zone'],
+            "Bollinger": ['boll_upper', 'boll_mid', 'boll_lower', 'boll_position', 'boll_signal'],
+            "Risk/ATR": ['atr', 'atr_pct', 'stop_loss_suggest'],
+            "Structure": ['high_120', 'price_vs_high120', 'distance_from_ma20'],
+            "Volume": ['volume', 'volume_ratio', 'volume_change_pct', 'volume_signal', 'volume_confirmation', 'volume_pattern'],
+        }
+        
+        for cat, keys in categories.items():
+            line_items = []
+            for k in keys:
+                val = metrics.get(k)
+                if val is not None:
+                    line_items.append(f"{k}: {val}")
+            if line_items:
+                print(f"   [{cat}] " + ", ".join(line_items))
+
+        print(f"   [Result] Score: {metrics.get('composite_score')} | Rating: {metrics.get('rating')} | Suggestion: {metrics.get('operation_suggestion')}")
+        
+        if 'score_breakdown' in metrics:
+            print("   [Breakdown] " + " | ".join([f"{item[0]}: {item[1]}/{item[2]}" for item in metrics['score_breakdown']]))
+        
+        if 'score_details' in metrics:
+            print("   [Reasons]")
+            for detail in metrics['score_details']:
+                print(f"     * {detail}")
+                
+        if 'pattern_details' in metrics and metrics['pattern_details']:
+             print("   [Patterns]")
+             for p in metrics['pattern_details']:
+                 print(f"     * {p}")
+        print("   " + "-"*60)
+            
+    except Exception as e:
+        print(f"   ⚠️ Error printing details: {e}")
 
 def run_deep_screen(candidates: List[Dict[str, Any]], config: Dict[str, Any], rules: Dict[str, Any] = None) -> List[Dict[str, Any]]:
     """
@@ -429,6 +465,9 @@ def run_deep_screen(candidates: List[Dict[str, Any]], config: Dict[str, Any], ru
                     
                 final_candidates.append(metrics)
                 print(f"  ✨ Found: {stock['name']} (Score: {metrics['composite_score']})")
+                
+                # Log detailed reasons as requested
+                print_detailed_metrics(metrics)
                 
             except Exception as e:
                 print(f"  ❌ Error processing {stock['symbol']}: {e}")

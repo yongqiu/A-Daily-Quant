@@ -205,6 +205,11 @@ class TushareFetcher(BaseFetcher):
             return f"{code}.SZ"
         elif code.startswith(('4', '8')):
             return f"{code}.BJ"
+        # ETF Prefixes
+        elif code.startswith(('51', '52', '56', '58')): # SH ETF
+            return f"{code}.SH"
+        elif code.startswith(('15', '16', '18')): # SZ ETF (15xxxx is typical SZ ETF)
+            return f"{code}.SZ"
         else:
             # 默认尝试深市
             logger.warning(f"无法确定股票 {code} 的市场，默认使用深市")
@@ -241,15 +246,24 @@ class TushareFetcher(BaseFetcher):
         ts_start = start_date.replace('-', '')
         ts_end = end_date.replace('-', '')
         
-        logger.debug(f"调用 Tushare daily({ts_code}, {ts_start}, {ts_end})")
-        
         try:
-            # 调用 daily 接口获取日线数据
-            df = self._api.daily(
-                ts_code=ts_code,
-                start_date=ts_start,
-                end_date=ts_end,
-            )
+            # 根据代码前缀判断是调用 stock 还是 fund 接口
+            is_fund = stock_code.startswith(('51', '52', '56', '58', '15', '16', '18'))
+            
+            if is_fund:
+                logger.debug(f"调用 Tushare fund_daily({ts_code}, {ts_start}, {ts_end})")
+                df = self._api.fund_daily(
+                    ts_code=ts_code,
+                    start_date=ts_start,
+                    end_date=ts_end,
+                )
+            else:
+                # 调用 daily 接口获取日线数据
+                df = self._api.daily(
+                    ts_code=ts_code,
+                    start_date=ts_start,
+                    end_date=ts_end,
+                )
             
             return df
             
@@ -305,6 +319,64 @@ class TushareFetcher(BaseFetcher):
         df = df[existing_cols]
         
         return df
+
+
+    def get_realtime_quote(self, stock_code: str) -> Optional['UnifiedRealtimeQuote']:
+        """
+        获取实时行情 (Tushare 接口)
+        底层通常由于 tushare 调用新浪接口
+        """
+        from .realtime_types import UnifiedRealtimeQuote, RealtimeSource, safe_float, safe_int
+        import tushare as ts
+        
+        try:
+            # 速率限制
+            self._check_rate_limit()
+            
+            # ts.get_realtime_quotes 不需要后缀，只需要数字代码
+            # 如果是有后缀的，去掉后缀
+            code = stock_code.split('.')[0]
+            
+            df = ts.get_realtime_quotes(code)
+            
+            if df is None or df.empty:
+                return None
+                
+            row = df.iloc[0]
+            
+            # 字段映射
+            # name, open, pre_close, price, high, low, bid, ask, volume, amount, date, time, code
+            price = safe_float(row['price'])
+            pre_close = safe_float(row['pre_close'])
+            
+            change_pct = 0.0
+            change_amount = 0.0
+            
+            if pre_close and pre_close > 0:
+                change_amount = price - pre_close
+                change_pct = (change_amount / pre_close) * 100
+            
+            quote = UnifiedRealtimeQuote(
+                code=stock_code,
+                name=row['name'],
+                source=RealtimeSource.TUSHARE,
+                price=price,
+                change_pct=change_pct,
+                change_amount=change_amount,
+                volume=safe_int(float(row['volume'])), # Tushare返回可能是字符串且带小数
+                amount=safe_float(row['amount']),
+                open_price=safe_float(row['open']),
+                high=safe_float(row['high']),
+                low=safe_float(row['low']),
+                pre_close=pre_close,
+                # Tushare这个接口不返回换手率等复杂指标
+            )
+            
+            return quote
+            
+        except Exception as e:
+            logger.warning(f"[Tushare] 获取实时行情失败 {stock_code}: {e}")
+            return None
 
 
 if __name__ == "__main__":

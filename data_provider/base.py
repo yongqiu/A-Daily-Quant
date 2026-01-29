@@ -505,6 +505,14 @@ class DataFetcherManager:
                                 quote = fetcher.get_realtime_quote(stock_code, source="sina")
                             break
                 
+                elif source == "tushare":
+                    # 尝试 TushareFetcher (新浪封装)
+                    for fetcher in self._fetchers:
+                        if fetcher.name == "TushareFetcher":
+                            if hasattr(fetcher, 'get_realtime_quote'):
+                                quote = fetcher.get_realtime_quote(stock_code)
+                            break
+                
                 elif source in ("tencent", "akshare_qq"):
                     # 尝试 AkshareFetcher 腾讯数据源
                     for fetcher in self._fetchers:

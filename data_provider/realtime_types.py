@@ -98,6 +98,7 @@ class RealtimeSource(Enum):
     AKSHARE_QQ = "akshare_qq"       # 腾讯财经
     TENCENT = "tencent"             # 腾讯直连
     SINA = "sina"                   # 新浪直连
+    TUSHARE = "tushare"             # Tushare/新浪封装
     FALLBACK = "fallback"           # 降级兜底
 
 

@@ -441,9 +441,56 @@ def get_sector_performance(sector_name: str, sector_df: pd.DataFrame = None) -> 
             sector_df = fetch_sector_data()
             
         if sector_df is not None and not sector_df.empty:
+             # 1. Exact Match
              row = sector_df[sector_df['板块名称'] == sector_name]
              if not row.empty:
                  return float(row.iloc[0]['涨跌幅'])
+
+             # 2. Alias Map (Tushare/SW -> EastMoney)
+             # EastMoney Sectors: '农牧饲渔', '软件开发', '房地产开发', '电子元件', etc.
+             alias_map = {
+                 "种植业": "农牧饲渔",
+                 "林业": "农牧饲渔",
+                 "畜禽养殖": "农牧饲渔",
+                 "渔业": "农牧饲渔",
+                 "饲料": "农牧饲渔",
+                 "农产品加工": "农牧饲渔",
+                 "农业综合": "农牧饲渔",
+                 "软件服务": "软件开发",
+                 "IT设备": "计算机设备",
+                 "元器件": "电子元件",
+                 "全国地产": "房地产开发",
+                 "区域地产": "房地产开发",
+                 "房产服务": "房地产服务",
+                 "建筑工程": "工程建设",
+                 "运输设备": "交运设备",
+                 "电气设备": "电网设备", # or 电机, 电源设备
+                 "其他商业": "商业百货",
+                 "综合类": "综合行业",
+                 "服饰": "纺织服装",
+                 "普钢": "钢铁行业",
+                 "特钢": "钢铁行业"
+             }
+             
+             mapped_name = alias_map.get(sector_name)
+             if mapped_name:
+                 row = sector_df[sector_df['板块名称'] == mapped_name]
+                 if not row.empty:
+                     print(f"✅ Mapped sector '{sector_name}' -> '{mapped_name}'")
+                     return float(row.iloc[0]['涨跌幅'])
+
+             # 3. Fuzzy Match (Contains)
+             # e.g. "汽车" -> "汽车整车", "汽车零部件"
+             # e.g. "半导体" -> "半导体"
+             # Reverse contains: if sector_name in EM_name
+             for _, r in sector_df.iterrows():
+                 em_name = r['板块名称']
+                 if sector_name in em_name or em_name in sector_name:
+                      # Careful with short matches
+                      if len(sector_name) > 1 and len(em_name) > 1:
+                           print(f"⚠️ Fuzzy matched sector '{sector_name}' ~= '{em_name}'")
+                           return float(r['涨跌幅'])
+                           
     except Exception as e:
         print(f"Error getting sector performance for {sector_name}: {e}")
         

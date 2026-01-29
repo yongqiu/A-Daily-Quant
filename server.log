@@ -1,0 +1,4 @@
+Traceback (most recent call last):
+  File "/Users/yongqiuwu/works/github/a_daily_strategy/web_server.py", line 5, in <module>
+    from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
+ModuleNotFoundError: No module named 'fastapi'

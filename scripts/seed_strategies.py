@@ -81,7 +81,7 @@ def seed_strategies():
 **标的：** {{ stock_info.name }} ({{ stock_info.symbol }})
 **现价：** ¥{{ tech_data.close }} (涨幅: {{ tech_data.change_pct }}%)
 **量比：** {{ tech_data.volume_ratio }}
-**板块：** {{ tech_data.sector }} (Rank: {{ tech_data.rank_in_sector | default('N/A') }})
+**板块：** {{ tech_data.sector }} (涨跌: {{ tech_data.sector_change }}%){% if tech_data.rank_in_sector and tech_data.rank_in_sector != 'N/A' %} (Rank: {{ tech_data.rank_in_sector }}){% endif %}
 
 # Task
 1. **地位定性**：判断该股是龙几？
@@ -121,7 +121,7 @@ def seed_strategies():
 **一、情报**
 - **标的**：{{ stock_info.name }} ({{ realtime_data.change_pct }}%)
 - **资金**：主力净入 {{ realtime_data.money_flow.net_amount_main | default(0) }}
-- **板块**：{{ tech_data.sector }} ({{ tech_data.sector_change }}%)
+- **板块**：{{ tech_data.sector }} ({{ tech_data.sector_change }}%){% if tech_data.rank_in_sector and tech_data.rank_in_sector != 'N/A' %} [Rank:{{tech_data.rank_in_sector}}]{% endif %}
 - **大盘**：{{ realtime_data.market_index_status }}
 
 **二、分析**

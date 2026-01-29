@@ -19,7 +19,7 @@ class Config:
     
     # Realtime Quotes
     enable_realtime_quote: bool = True
-    realtime_source_priority: str = "akshare_sina,tencent,efinance,akshare_em"
+    realtime_source_priority: str = "tushare,akshare_sina,tencent,efinance,akshare_em"
     realtime_cache_ttl: int = 600
     circuit_breaker_cooldown: int = 300
     enable_chip_distribution: bool = True

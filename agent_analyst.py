@@ -210,121 +210,171 @@ class MultiAgentSystem:
         Run the debate and yield SSE events.
         Format: JSON string for SSE data.
         """
-        # 1. Prepare Context
+        # 1. Prepare Basic Data (Common Context)
         asset_type = stock_info.get('asset_type', 'stock')
         
-        # Fix Price 0 issue: Prioritize realtime, fallback to history close if 0 or None
+        # Fix Price 0 issue
         price = realtime_data.get('price')
-        
-        # Ensure we treat 0.0 as invalid
         if not price or float(price) == 0:
              price = tech_data.get('close', 0)
-        
-        # If still 0, try fallbacks
         if not price or float(price) == 0:
-             # Try other potential keys
              price = tech_data.get('realtime_price', 0)
-
-        # Last resort: Use MA5 or MA20 as proxy if price is completely missing but indicators exist
-        # This prevents "Price: 0.0" which confuses LLM
         if (not price or float(price) == 0):
-             if tech_data.get('ma5'):
-                 price = tech_data.get('ma5')
-             elif tech_data.get('ma20'):
-                 price = tech_data.get('ma20')
+             if tech_data.get('ma5'): price = tech_data.get('ma5')
+             elif tech_data.get('ma20'): price = tech_data.get('ma20')
 
-        # Fix Date issue: Provide explicit date
         current_date = datetime.now().strftime('%Y-%m-%d')
         
-        # 获取K线形态
-        pattern_score = tech_data.get('pattern_score', 0)
-        pattern_details = tech_data.get('pattern_details', [])
-        pattern_str = "无"
-        if pattern_details:
-             pattern_str = ", ".join(pattern_details) + f" (修正分: {pattern_score})"
-
-        context = f"""
+        # Common Context (Shared by all)
+        common_context = f"""
 **分析对象**：{stock_info['name']} ({stock_info['symbol']}) [{asset_type.upper()}]
 **分析日期**：{current_date}
 **当前价格**：{price} (涨跌: {realtime_data.get('change_pct', 0)}%)
-
-**技术指标概览**：
-- MA20: {tech_data.get('ma20', 'N/A')}
-- MA60: {tech_data.get('ma60', 'N/A')}
-- RSI: {tech_data.get('rsi', 'N/A')}
-- K线形态: {pattern_str}
-- 量比: {realtime_data.get('volume_ratio', 'N/A')}
-- 波动率(ATR%): {tech_data.get('atr_pct', 'N/A')}%
-
-**市场环境**：
-- 大盘指数：{realtime_data.get('market_index_price', 'N/A')} ({realtime_data.get('market_index_change', 0)}%)
+**市场大盘**：{realtime_data.get('market_index_price', 'N/A')} ({realtime_data.get('market_index_change', 0)}%)
 """
+
+        # --- Enhanced Data Fetching ---
+        news_context = ""
+        funds_context = ""
+        financial_context = ""
+        
+        try:
+            from data_provider.akshare_fetcher import AkshareFetcher
+            full_fetcher = AkshareFetcher(sleep_min=0.1, sleep_max=0.5)
+            
+            yield json.dumps({"type": "step", "content": "📡 正在并行获取：基本面数据、资金流向、最新资讯..."})
+            
+            # Run fetches in executor to verify non-blocking IO if possible, or just synchronous for now
+            # In production, these should be async. Here we use sync calls but they are fast enough or worth waiting.
+            
+            # 1. News
+            news_items = full_fetcher.get_stock_news(stock_info['symbol'])
+            if news_items:
+                news_context = "\n**近期重要资讯**：\n"
+                for item in news_items[:3]:
+                    news_context += f"- [{item['date']}] {item['title']}\n"
+            
+            # 2. Funds Flow (For Technician)
+            funds_data = full_fetcher.fetch_money_flow(stock_info['symbol'])
+            if funds_data and funds_data.get('status') == 'success':
+                net_main = funds_data.get('net_amount_main', 0) / 10000.0 # 万
+                net_main_str = f"{net_main:.2f}万" if abs(net_main) < 10000 else f"{net_main/10000:.2f}亿"
+                
+                funds_context = f"""
+**资金流向数据**：
+- 主力净流入：{net_main_str} (占比: {funds_data.get('net_pct_main', 0)}%)
+- 超大单净流入：{funds_data.get('net_amount_super', 0)/10000:.2f}万
+- 涨跌幅：{funds_data.get('change_pct', 0)}%
+"""
+            
+            # 3. Financials (For Fundamentalist)
+            reports_data = full_fetcher.fetch_financial_report(stock_info['symbol'])
+            if reports_data and reports_data.get('data'):
+                latest_date = reports_data.get('latest_date', 'N/A')
+                latest_report = reports_data['data'].get(latest_date, {})
+                
+                # Extract key metrics if available (Handling potential key variations)
+                # Akshare abstract often has: '归母净利润', '营业总收入', '净利润同比增长', etc.
+                # Try to get raw dump of key fields
+                financial_context = f"\n**核心财务数据 (最新报告期: {latest_date})**：\n"
+                key_fields = ['营业总收入', '归母净利润', '扣非净利润', '基本每股收益', '净资产收益率']
+                
+                for k, v in latest_report.items():
+                    for target in key_fields:
+                        if target in k:
+                            financial_context += f"- {k}: {v}\n"
+                            
+            yield json.dumps({"type": "step", "content": "✅ 多维度深度数据获取完成"})
+
+        except Exception as e:
+            logger.error(f"Enhanced fetch failed: {e}")
+            yield json.dumps({"type": "step", "content": f"⚠️ 数据增强部分失败: {str(e)}"})
+
+        # --- Construct Specialized Contexts ---
+        
+        # 1. Technician Context
+        # Structure: K-Line Pattern, MA, Support/Resistance, Funds Flow, News
+        pattern_str = ", ".join(tech_data.get('pattern_details', [])) or "无明显形态"
+        tech_context = f"""
+{common_context}
+
+**技术面深度数据**：
+- 均线系统：MA5={tech_data.get('ma5')}, MA20={tech_data.get('ma20')}, MA60={tech_data.get('ma60')}
+- 均线排列：{tech_data.get('ma_arrangement', '未知')}
+- K线形态：{pattern_str} (形态分: {tech_data.get('pattern_score', 0)})
+- 相对强弱(RSI)：{tech_data.get('rsi', 'N/A')}
+- 支撑/压力：支撑位 {tech_data.get('support', 'N/A')}, 压力位 {tech_data.get('resistance', 'N/A')}
+- 波动率(ATR)：{tech_data.get('atr_pct', 'N/A')}%
+{funds_context}
+{news_context}
+"""
+
+        # 2. Fundamentalist Context
+        # Structure: Valuation (PE/PB), Financials, Sector Rank, long-term trend (MA60)
+        # Assuming realtime_data has PE/PB
+        pe = realtime_data.get('pe_ratio', 'N/A')
+        pb = realtime_data.get('pb_ratio', 'N/A')
+        total_mv = realtime_data.get('total_mv', 'N/A')
+        
+        fund_context = f"""
+{common_context}
+
+**基本面深度数据**：
+- 估值指标：PE(动态)={pe}, PB={pb}, 总市值={total_mv}
+- 财务摘要：
+{financial_context if financial_context else "暂无详细财报数据"}
+- 长期趋势：MA60={tech_data.get('ma60')} (牛熊分界)
+{news_context}
+"""
+
+        # 3. Risk Context
+        # Structure: Volatility, Market Environment, Stop Loss, Position Sizing hints
+        risk_context = f"""
+{common_context}
+
+**风控核心指标**：
+- 波动率(ATR%)：{tech_data.get('atr_pct', 'N/A')}% (高波动需降仓)
+- 市场环境：{realtime_data.get('market_index_change', 0)}% (大盘涨跌)
+- 盈亏比评估：上方压力 {tech_data.get('resistance', 'N/A')} vs 下方支撑 {tech_data.get('support', 'N/A')}
+- 乖离率：当前价格距离 MA20 {(float(price) - float(tech_data.get('ma20', price)))/float(tech_data.get('ma20', 1))*100:.2f}%
+{news_context}
+"""
+
+        # Dispatcher Map
+        context_map = {
+            "agent_technician": tech_context,
+            "agent_fundamentalist": fund_context,
+            "agent_risk_officer": risk_context
+        }
+
         yield json.dumps({"type": "progress", "value": start_progress, "message": "初始化多智能体辩论环境..."})
         yield json.dumps({"type": "step", "content": "🔔 辩论组建完毕，准备开始..."})
-        
-        # We start with the CIO section placeholder or header
         yield json.dumps({"type": "token", "content": "\n\n# 🤖 AI 专家团队辩论纪要\n\n"})
         
         agent_results = []
-        
-        # 2. Round 1: Parallel Analysis
         tasks = []
         total_agents = len(self.agents)
-        
-        # Send initial progress for analysis start
         current_progress = start_progress + 5
         yield json.dumps({"type": "progress", "value": current_progress, "message": "专家团队开始并行分析..."})
 
         for i, agent in enumerate(self.agents):
-            tasks.append(agent.analyze(context, self.api_config))
+            # Select specific context or fallback to common
+            my_context = context_map.get(agent.slug, common_context + news_context)
+            tasks.append(agent.analyze(my_context, self.api_config))
         
-        # Wait for all (Parallel)
         results = await asyncio.gather(*tasks)
         
         debate_content = ""
-        
-        # Allocate 40% of progress bar for agents analysis (e.g., 35% -> 75%)
-        # But allow some room for CIO. Let's say agents take us to 80%.
-        # If start is 35, remaining is 65.
-        # Agents phase: 35 -> 80 (delta 45)
-        # CIO phase: 80 -> 95 (delta 15)
-        
         progress_range_agents = 45
         
-        # Process results with incremental progress updates
         for i, res in enumerate(results):
             agent = self.agents[i]
-            # Calculate incremental progress
             inc = int(((i + 1) / total_agents) * progress_range_agents)
             progress_pct = current_progress + inc
             
             yield json.dumps({"type": "progress", "value": progress_pct, "message": f"{agent.name} 完成分析"})
             yield json.dumps({"type": "step", "content": f"✅ {agent.name} 提交了分析报告"})
 
-            # Format: Use HTML <details> for cleaner UI, so it's not one huge text block
-            # But the user also wants to see it.
-            # Let's use a nice blockquote or custom div structure if markdown supports it.
-            # Using blockquote `> ` is standard.
-            
-            section_header = f"### 👤 {agent.name}\n"
-            section_body = f"{res}\n\n"
-            
-            # Wrap in a way that looks like a card in Markdown?
-            # We can use HTML directly since we render HTML.
-            section_html_wrapper = f"""
-<div class="agent-card mb-4 p-4 bg-gray-800/50 rounded-lg border border-gray-700">
-    <div class="font-bold text-indigo-300 mb-2 border-b border-gray-700 pb-2">👤 {agent.name}</div>
-    <div class="prose prose-sm prose-invert text-gray-300">
-{res}
-    </div>
-</div>
-"""
-            # NOTE: If we yield HTML directly as 'token', the frontend accumulating markdown might act weird
-            # if it expects pure markdown.
-            # However, standard Markdown parsers handle HTML blocks fine.
-            # Let's try to stick to Markdown for safety but use quoted blocks.
-            
-            # 使用 HTML details/summary 实现折叠效果
             section_html = f"""
 <details class="mb-3 group border border-gray-700/50 rounded-lg bg-gray-800/30 overflow-hidden">
     <summary class="cursor-pointer p-3 hover:bg-white/5 transition-colors flex items-center justify-between select-none list-none text-sm outline-none">
@@ -340,10 +390,7 @@ class MultiAgentSystem:
 </details>
 <div class="h-2"></div>
 """
-            # 为了内容完整性，debate_content 累加 HTML
             debate_content += section_html
-            
-            # Stream the agent's output
             yield json.dumps({"type": "token", "content": section_html})
             agent_results.append(f"【{agent.name}意见】:\n{res}")
 
@@ -351,10 +398,12 @@ class MultiAgentSystem:
         yield json.dumps({"type": "step", "content": "🤔 首席投资官 (CIO) 正在汇总专家意见..."})
         yield json.dumps({"type": "progress", "value": 85, "message": "首席投资官 (CIO) 正在制定最终决策..."})
         
+        # CIO sees Common Context + All Opinions
         cio_context = f"""
-{context}
+{common_context}
+{news_context}
 
-以下是各位专家的意见：
+**专家团队辩论摘要**：
 {''.join(agent_results)}
 
 请根据以上信息，进行最终总结和决策。
@@ -364,20 +413,16 @@ class MultiAgentSystem:
         yield json.dumps({"type": "progress", "value": 95, "message": "正在生成最终报告..."})
         yield json.dumps({"type": "step", "content": "✍️ CIO 正在签署最终裁决书..."})
 
-        # --- CIO Simluated Streaming ---
         cio_header = "\n\n### 🎖️ 首席投资官 (CIO) 最终裁决\n\n"
         yield json.dumps({"type": "token", "content": cio_header})
         
-        # 将结果按 chunk 切分，每隔一小段时间 yield 一次
-        chunk_size = 8 # 每次输出8个字符
+        chunk_size = 8
         for i in range(0, len(cio_result), chunk_size):
             chunk = cio_result[i:i+chunk_size]
             yield json.dumps({"type": "token", "content": chunk})
-            await asyncio.sleep(0.01) # 极短的延迟模拟打字感
+            await asyncio.sleep(0.01)
             
         cio_section = cio_header + cio_result + "\n\n"
-        
-        # Final formatting
         full_report = debate_content + cio_section
         
         yield json.dumps({"type": "progress", "value": 100, "message": "分析完成"})

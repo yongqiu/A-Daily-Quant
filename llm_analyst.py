@@ -325,9 +325,11 @@ def create_deep_candidate_prompt(stock_info: Dict[str, Any], tech_data: Dict[str
     if low_val == 0 and current_price > 0:
         low_val = round(current_price * 0.98, 2)  # Est -2%
         
-    # 2. MA Arrangement Deduction
-    ma_str = tech_data.get('ma_arrangement', '未知')
-    if ma_str == '未知' or ma_str is None:
+    # --- Refined Technical Indicators ---
+    
+    # 2. MA Arrangement & Pattern
+    ma_str = tech_data.get('ma_arrangement')
+    if not ma_str or ma_str == 'None':
         ma5 = tech_data.get('ma5')
         ma10 = tech_data.get('ma10')
         ma20 = tech_data.get('ma20')
@@ -335,6 +337,31 @@ def create_deep_candidate_prompt(stock_info: Dict[str, Any], tech_data: Dict[str
              if ma5 > ma10 > ma20: ma_str = "多头排列"
              elif ma5 < ma10 < ma20: ma_str = "空头排列"
              else: ma_str = "震荡交织"
+        else:
+             ma_str = "均线粘合/未知" # Fallback if data missing
+
+    # 3. Calculate Resistance/Support
+    price = tech_data.get('close', current_price)
+    res = tech_data.get('resistance')
+    if not res: res = tech_data.get('pivot_point')
+    if not res: res = price * 1.1 # Last resort fallback
+
+    sup = tech_data.get('support') 
+    if not sup: sup = tech_data.get('s1')
+    if not sup: sup = price * 0.9
+
+    # 4. Extended Tech Indicators
+    ma60 = tech_data.get('ma60', 0)
+    vol_ratio = tech_data.get('volume_ratio', realtime_data.get('volume_ratio', 'N/A'))
+    rsi = tech_data.get('rsi', 'N/A')
+    
+    macd_str = "N/A"
+    dif = tech_data.get('macd_dif')
+    dea = tech_data.get('macd_dea')
+    if dif is not None and dea is not None:
+        macd_str = "金叉" if dif > dea else "死叉"
+        if dif > 0 and dea > 0: macd_str += " (零轴上)"
+        else: macd_str += " (零轴下)"
 
     computed = {
         'score_str': score_str,
@@ -342,7 +369,15 @@ def create_deep_candidate_prompt(stock_info: Dict[str, Any], tech_data: Dict[str
         'lhb_str': lhb_str,
         'high_val': high_val,
         'low_val': low_val,
-        'ma_str': ma_str
+        'ma_str': ma_str,
+        'ma60': ma60,
+        'res': f"{res:.2f}",
+        'sup': f"{sup:.2f}",
+        'vol_ratio': vol_ratio,
+        'rsi': rsi,
+        'macd_str': macd_str,
+        'sector': tech_data.get('sector', '未知板块'),
+        'sector_change': tech_data.get('sector_change', 0)
     }
 
     db_prompt = get_prompt_from_db('deep_monitor', {

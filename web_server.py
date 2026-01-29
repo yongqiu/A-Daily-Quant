@@ -36,12 +36,17 @@ from data_fetcher import fetch_data_dispatcher, calculate_start_date, fetch_stoc
 from indicator_calc import calculate_indicators, get_latest_metrics # Import needed for score API
 from monitor_engine import get_realtime_data # Import needed for score API
 from etf_score import apply_etf_score # Import needed for ETF score
+from data_provider.base import DataFetcherManager # New Data Manager
 import database  # Add database import
+from stock_screener import print_detailed_metrics # Import logging helper
+from scoring_service import calculate_comprehensive_score
 
 app = FastAPI(title="A-Share Strategy Monitor")
 
 # Initialize Engine
 monitor_engine = MonitorEngine()
+# Initialize Data Manager
+data_manager = DataFetcherManager()
 
 # Setup Templates
 templates = Jinja2Templates(directory="templates")
@@ -374,7 +379,16 @@ async def get_kline_data(symbol: str, period: str = 'daily'):
         start_date = calculate_start_date(days)
         
         # Pass period to dispatcher
-        df = fetch_data_dispatcher(symbol, asset_type, start_date, period=period)
+        # Use DataManager for daily stock/etf data to ensure stability
+        if period == 'daily' and asset_type in ['stock', 'etf']:
+            try:
+                # get_daily_data returns (df, source_name)
+                df, _ = data_manager.get_daily_data(symbol, start_date=start_date)
+            except Exception as e:
+                print(f"DataManager Fetch Failed: {e}, falling back to legacy dispatcher")
+                df = fetch_data_dispatcher(symbol, asset_type, start_date, period=period)
+        else:
+            df = fetch_data_dispatcher(symbol, asset_type, start_date, period=period)
         
         if df is None or df.empty:
             return {"status": "error", "message": "No data found"}
@@ -616,7 +630,18 @@ async def calculate_stock_score(symbol: str):
         # 2. Fetch History & Calculate Indicators
         start_date = calculate_start_date()
         asset_type = stock_info.get('asset_type', 'stock')
-        df = fetch_data_dispatcher(symbol, asset_type, start_date)
+        
+        # Use DataManager for robust fetching
+        df = None
+        if asset_type in ['stock', 'etf']:
+            try:
+                df, _ = data_manager.get_daily_data(symbol, start_date=start_date)
+            except Exception as e:
+                print(f"⚠️ DataManager failed for {symbol}: {e}")
+        
+        # Fallback to legacy if DataManager failed or not supported type
+        if df is None:
+             df = fetch_data_dispatcher(symbol, asset_type, start_date)
         
         if df is None or df.empty:
             return JSONResponse(status_code=500, content={"message": "无法获取历史数据"})
@@ -624,23 +649,49 @@ async def calculate_stock_score(symbol: str):
         df = calculate_indicators(df)
         
         # 3. Get Realtime Data to make it up-to-date
-        rt_dict = get_realtime_data([stock_info])
-        rt_data = rt_dict.get(symbol)
+        # Use DataManager for realtime (supports failover)
+        rt_data = None
+        if asset_type in ['stock', 'etf']:
+             try:
+                 quote = data_manager.get_realtime_quote(symbol)
+                 if quote:
+                     # Convert Quote object to dict format expected by calculator
+                     rt_data = {
+                         'symbol': quote.code,
+                         'name': quote.name,
+                         'price': quote.price,
+                         'change_pct': quote.change_pct,
+                         'volume': quote.volume,
+                         'amount': quote.amount,
+                         'volume_ratio': quote.volume_ratio,
+                         'turnover_rate': quote.turnover_rate,
+                         'asset_type': asset_type
+                     }
+             except Exception as e:
+                 print(f"⚠️ DataManager Realtime failed: {e}")
         
-        # 4. Merge Data (Realtime overrides history for 'close' to get accurate latest score)
-        latest = get_latest_metrics(df, float(stock_info.get('cost_price') or 0))
+        # Fallback
+        if not rt_data:
+             rt_dict = get_realtime_data([stock_info])
+             rt_data = rt_dict.get(symbol)
         
+        # 4. Merge Data: Calculate Comprehensive Score
+        # This replaces manual get_latest_metrics + TrendLogic + EtfLogic
+        latest = calculate_comprehensive_score(
+            df, 
+            symbol, 
+            cost_price=float(stock_info.get('cost_price') or 0), 
+            asset_type=asset_type
+        )
+        
+        # 4.1. Patch with Realtime Data (if available)
+        # Note: calculate_comprehensive_score uses df history. We patch price for display.
         if rt_data and rt_data.get('price'):
              latest['close'] = rt_data.get('price')
              latest['realtime_price'] = rt_data.get('price')
              latest['change_pct_today'] = rt_data.get('change_pct')
-             # Note: Recalculating MA/RSI with realtime price is complex without full timeseries update,
-             # so we usually accept 'latest close' means 'yesterday close' + 'current price' displayed
-             # But for storing metrics, we might want to store the snapshot.
-        
-        # Apply ETF Score logic if it is an ETF
-        if asset_type == 'etf':
-            latest = apply_etf_score(latest)
+
+
 
         # 5. Save to daily_metrics
         today = datetime.now().strftime('%Y-%m-%d')
@@ -652,6 +703,9 @@ async def calculate_stock_score(symbol: str):
         # Process pattern list to string
         pattern_list = latest.get('pattern_details', [])
         latest['pattern_flags'] = ",".join(pattern_list) if pattern_list else ""
+        
+        # Log detailed metrics to console (Requested by User)
+        print_detailed_metrics(latest)
         
         success = database.save_daily_metrics(today, latest)
         
@@ -756,7 +810,17 @@ async def analyze_stock_report_stream(symbol: str, mode: str = "multi_agent"):
                 # Fetch History
                 start_date = calculate_start_date()
                 asset_type = stock_info.get('asset_type', 'stock')
-                df = fetch_data_dispatcher(symbol, asset_type, start_date)
+                
+                df = None
+                # Use DataManager
+                if asset_type in ['stock', 'etf']:
+                    try:
+                        df, _ = data_manager.get_daily_data(symbol, start_date=start_date)
+                    except Exception:
+                        pass
+                
+                if df is None:
+                     df = fetch_data_dispatcher(symbol, asset_type, start_date)
                 
                 if df is None or df.empty:
                     yield f"data: {json.dumps({'type': 'error', 'content': '历史数据获取失败'})}\n\n"
@@ -773,8 +837,30 @@ async def analyze_stock_report_stream(symbol: str, mode: str = "multi_agent"):
                 # Fetch Realtime
                 monitor_engine_conf = monitor_engine.load_config() # Refresh config
                 index_data = monitor_engine.get_market_index()
-                rt_dict = get_realtime_data([stock_info])
-                rt_data = rt_dict.get(symbol)
+                
+                # Use DataManager
+                rt_data = None
+                if asset_type in ['stock', 'etf']:
+                     try:
+                         # Use global data_manager
+                         quote = data_manager.get_realtime_quote(symbol)
+                         if quote:
+                             rt_data = {
+                                 'symbol': quote.code,
+                                 'name': quote.name,
+                                 'price': quote.price,
+                                 'change_pct': quote.change_pct,
+                                 'volume_ratio': quote.volume_ratio,
+                                 'turnover_rate': quote.turnover_rate, # Optional but good
+                                 'asset_type': asset_type
+                             }
+                     except Exception as e:
+                         pass
+                
+                if not rt_data:
+                     # Fallback
+                     rt_dict = get_realtime_data([stock_info])
+                     rt_data = rt_dict.get(symbol)
                 
                 if not rt_data:
                     yield f"data: {json.dumps({'type': 'error', 'content': '实时数据获取失败'})}\n\n"
