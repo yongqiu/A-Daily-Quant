@@ -4,6 +4,15 @@
 echo "🚀 启动 A股实时监控助手..."
 echo ""
 
+# Check and setup virtual environment
+if [ ! -d ".venv" ]; then
+    echo "⚠️  未检测到虚拟环境，正在创建..."
+    python3 -m venv .venv
+    echo "📦 正在安装依赖..."
+    .venv/bin/pip install -r requirements.txt
+    echo "✅ 环境配置完成"
+fi
+
 # 激活虚拟环境
 source .venv/bin/activate
 

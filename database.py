@@ -137,6 +137,18 @@ def init_db():
         UNIQUE KEY unique_daily_metric (symbol, date)
     );
     """
+
+    create_intraday_logs_sql = """
+    CREATE TABLE IF NOT EXISTS intraday_logs (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        symbol VARCHAR(20) NOT NULL,
+        analysis_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        price DECIMAL(10, 4),
+        change_pct DECIMAL(10, 2),
+        ai_content TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    """
     
     try:
         conn = get_connection()
@@ -146,6 +158,7 @@ def init_db():
                 cursor.execute(create_analysis_table_sql)
                 cursor.execute(create_selection_table_sql)
                 cursor.execute(create_metrics_table_sql)
+                cursor.execute(create_intraday_logs_sql)
 
                 # Strategies Tables
                 cursor.execute("""
@@ -506,6 +519,7 @@ def save_daily_metrics(date: str, metrics: Dict[str, Any]) -> bool:
                 
                 # Helper to dump JSON safely
                 import json
+                import math
                 def dump_json(obj):
                     if not obj: return None
                     try:
@@ -513,30 +527,46 @@ def save_daily_metrics(date: str, metrics: Dict[str, Any]) -> bool:
                     except:
                         return None
                 
+                # Helper to safely convert to float, handling NaN values
+                def safe_float(value, default=None):
+                    """将值安全转换为 float，NaN 转换为 None（MySQL NULL）"""
+                    if value is None:
+                        return default
+                    # 检查是否为 NaN（支持 numpy.nan 和 math.nan）
+                    try:
+                        if math.isnan(value):
+                            return default
+                    except (TypeError, ValueError):
+                        pass
+                    try:
+                        return float(value)
+                    except (ValueError, TypeError):
+                        return default
+                
                 cursor.execute(sql, (
                     metrics['symbol'],
                     date,
-                    metrics.get('price', 0),
-                    metrics.get('change_pct', 0),
-                    metrics.get('ma5'),
-                    metrics.get('ma20'),
-                    metrics.get('ma60'),
-                    metrics.get('rsi'),
-                    metrics.get('kdj_k'),
-                    metrics.get('kdj_d'),
-                    metrics.get('macd_dif'),
-                    metrics.get('macd_dea'),
-                    metrics.get('macd_macd'),
-                    metrics.get('volume_ratio'),
-                    metrics.get('composite_score'),
+                    safe_float(metrics.get('price', 0)),
+                    safe_float(metrics.get('change_pct', 0)),
+                    safe_float(metrics.get('ma5')),
+                    safe_float(metrics.get('ma20')),
+                    safe_float(metrics.get('ma60')),
+                    safe_float(metrics.get('rsi')),
+                    safe_float(metrics.get('kdj_k')),
+                    safe_float(metrics.get('kdj_d')),
+                    safe_float(metrics.get('macd_dif')),
+                    safe_float(metrics.get('macd_dea')),
+                    safe_float(metrics.get('macd_macd')),
+                    safe_float(metrics.get('volume_ratio')),
+                    safe_float(metrics.get('composite_score')),
                     metrics.get('rating', ''),
                     metrics.get('pattern_flags', ''),
                     dump_json(metrics.get('score_breakdown')),
                     dump_json(metrics.get('score_details')),
                     metrics.get('operation_suggestion', ''),
-                    metrics.get('stop_loss_suggest'),
-                    metrics.get('atr_pct'),
-                    metrics.get('price_vs_high120')
+                    safe_float(metrics.get('stop_loss_suggest')),
+                    safe_float(metrics.get('atr_pct')),
+                    safe_float(metrics.get('price_vs_high120'))
                 ))
             conn.commit()
             print(f"✅ Saved daily metrics for {metrics['symbol']} on {date}")
@@ -822,6 +852,70 @@ def get_daily_selections(selection_date: Optional[str] = None) -> List[Dict[str,
     except Exception as e:
         print(f"❌ Error fetching selections: {e}")
         return []
+
+def save_intraday_log(symbol: str, price: float, change_pct: float, analysis: str):
+    """
+    Save real-time intraday analysis log.
+    """
+    try:
+        conn = get_connection()
+        try:
+            with conn.cursor() as cursor:
+                sql = """
+                INSERT INTO intraday_logs (symbol, price, change_pct, ai_content, analysis_time)
+                VALUES (%s, %s, %s, %s, NOW())
+                """
+                cursor.execute(sql, (symbol, price, change_pct, analysis))
+            conn.commit()
+            print(f"✅ Saved intraday log for {symbol}")
+            return True
+        except Exception as e:
+            conn.rollback()
+            print(f"❌ Error saving intraday log for {symbol}: {e}")
+            return False
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"❌ Database connection error: {e}")
+        return False
+
+def get_intraday_log(symbol: str, analysis_time: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    获取盘中分析日志。
+    如果 analysis_time 为 None，则获取该股票的最新一条记录。
+    """
+    try:
+        conn = get_connection()
+        try:
+            with conn.cursor() as cursor:
+                if analysis_time:
+                    # 查询指定时间的记录
+                    sql = "SELECT * FROM intraday_logs WHERE symbol = %s AND analysis_time = %s"
+                    params = (symbol, analysis_time)
+                else:
+                    # 查询最新记录
+                    sql = "SELECT * FROM intraday_logs WHERE symbol = %s ORDER BY analysis_time DESC LIMIT 1"
+                    params = (symbol,)
+                
+                cursor.execute(sql, params)
+                row = cursor.fetchone()
+                
+                if row:
+                    return {
+                        'id': row['id'],
+                        'symbol': row['symbol'],
+                        'analysis_time': row['analysis_time'].strftime('%Y-%m-%d %H:%M:%S') if row.get('analysis_time') else '',
+                        'price': float(row['price']) if row['price'] else 0,
+                        'change_pct': float(row['change_pct']) if row['change_pct'] else 0,
+                        'ai_content': row['ai_content'],
+                        'created_at': row['created_at'].strftime('%Y-%m-%d %H:%M:%S') if row.get('created_at') else ''
+                    }
+                return None
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"❌ Error fetching intraday log for {symbol}: {e}")
+        return None
 
 def get_all_strategies() -> List[Dict[str, Any]]:
     """Get all strategies"""

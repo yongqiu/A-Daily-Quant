@@ -214,21 +214,287 @@ def create_realtime_prompt(stock_info: Dict[str, Any], history_data: Dict[str, A
     return "DB Error: realtime_intraday prompt not found."
 
 
+
+def create_intraday_prompt(
+    stock_info: Dict[str, Any], 
+    tech_data: Dict[str, Any], 
+    realtime_data: Dict[str, Any],
+    market_context: Dict[str, Any] = None
+) -> str:
+    """
+    Create a specific INTRADAY prompt for real-time monitoring.
+    Uses 'intraday_monitor' template provided by User.
+    """
+    print(f"Intraday: {stock_info['symbol']} - {stock_info['name']}")
+    
+    # --- Prepare Data ---
+    
+    # 1. Real-time Basic
+    price = realtime_data.get('price', 0)
+    change_pct = realtime_data.get('change_pct', 0)
+    change_desc = f"{change_pct}%"
+    if change_pct > 0: change_desc = f"+{change_pct}%"
+    
+    vwap = realtime_data.get('vwap', 0)
+    
+    # 2. Market Context (from market_context or fallback)
+    if not market_context:
+        market_context = {}
+    
+    print(f"🔍 [create_intraday_prompt] market_context = {market_context}")
+        
+    index_name = market_context.get('market_index', {}).get('name', '大盘')
+    index_change = market_context.get('market_index', {}).get('change_pct', 0)
+    index_trend = market_context.get('market_index', {}).get('trend', '横盘')
+    index_desc = f"{index_change}% (分时走势：{index_trend})"
+    
+    print(f"🔍 [create_intraday_prompt] index_desc = {index_desc}")
+    
+    sector_name = market_context.get('sector_info', {}).get('name', 'N/A')
+    sector_change = market_context.get('sector_info', {}).get('change_pct', 0)
+    # Mock rank for now
+    sector_desc = f"[{sector_name}] 板块 (涨跌: {sector_change}%)"
+    
+    sentiment_limit_up = market_context.get('sentiment', {}).get('limit_up_count', 'N/A')
+    sentiment_desc = f"连板高度 {sentiment_limit_up} 板"
+    
+    # 3. Technical & Real-time Details
+    
+    # Deviate from VWAP (乖离率)
+    deviate_msg = "分时均价线附近"
+    if vwap > 0:
+        deviate = (price - vwap) / vwap * 100
+        if deviate > 2: deviate_msg = "偏离均价线过远 (上方悬浮)"
+        elif deviate < -2: deviate_msg = "偏离均价线过远 (下方超跌)"
+        elif price < vwap: deviate_msg = "承压于分时均价线"
+        elif price > vwap: deviate_msg = "运行于分时均价线上方"
+        
+    # Volume Ratio & Status
+    vol_ratio = realtime_data.get('volume_ratio', 0)
+    vol_status = "平量震荡"
+    if vol_ratio > 1.5: vol_status = "放量拉升" if change_pct > 0 else "放量下跌"
+    elif vol_ratio < 0.8: vol_status = "缩量震荡"
+    
+    # Order Flow (WeiBi)
+    weibi = realtime_data.get('weibi', 0)
+    flow_desc = "买卖均衡"
+    if weibi > 30: flow_desc = f"主动买盘占优 (委比 {weibi}%)"
+    elif weibi < -30: flow_desc = f"主动卖盘远大于主动买盘 (委比 {weibi}%)"
+    else: flow_desc = f"盘口委比 {weibi}%"
+    
+    # Support/Resistance (Yesterday or Pivot)
+    last_close = tech_data.get('close', price) # Fallback
+    support_price = tech_data.get('s1', last_close * 0.98)
+    res_price = tech_data.get('r1', last_close * 1.02)
+    pressure_desc = f"支撑位 {support_price:.2f}, 压力位 {res_price:.2f}"
+    
+    # Yesterday Score
+    score = tech_data.get('composite_score', 'N/A')
+
+    # Construct the Prompt
+    prompt = f"""# Role
+你是一名资深A股短线操盘手，擅长捕捉分时博弈与情绪拐点。当前目标：{stock_info['name']} ({stock_info['symbol']})。
+
+# Market Context (大环境)
+- 大盘指数: {index_desc}
+- 板块热度: {sector_desc}
+- 市场情绪: {sentiment_desc}
+
+# Technical & Real-time Data (实时多空)
+- 现价: {price} ({change_desc})
+- 分时位置: {deviate_msg} (VWAP: {vwap})
+- 成交异动: 量比 {vol_ratio} ({vol_status})
+- 关键点位: {pressure_desc}
+- 筹码博弈: {flow_desc}
+
+# Strategy Rules (执行准则)
+1. 严禁在分时均价线下方左侧买入。
+2. 若缩量跌破 [{support_price:.2f}]，必须无条件触发止损。
+3. 若放量突破 [{res_price:.2f}] 压力位，视为转强信号。
+
+# Task
+结合昨日技术形态 (Score: {score}) 与当前盘口多空力量对比，判断当前是“诱多陷阱”还是“缩量洗盘”？给出即时动作。
+
+# Output (JSON)
+{{
+  "market_mood": "恐慌/观望/修复/高潮",
+  "logic": "100字内，重点分析价格与分时均价线、成交量的配合关系...",
+  "action": "BUY | SELL | HOLD | REDUCE (减仓) | WAIT",
+  "target_price": "预期的反弹高度或下一个止损观察点",
+  "confidence": "High/Medium/Low"
+}}"""
+    
+    return prompt
+
+
 def create_realtime_etf_prompt(stock_info: Dict[str, Any], tech_data: Dict[str, Any], realtime_data: Dict[str, Any]) -> str:
     """
-    Create a REAL-TIME ACTION prompt for ETFs (Stable, long-term).
-    Now uses DB strategy 'realtime_etf_dca'.
+    Create a REAL-TIME ACTION prompt for ETFs using the specific "Right-Side Trading + Sector Rotation" template.
     """
-    db_prompt = get_prompt_from_db('realtime_etf_dca', {
+    # 1. Prepare Data Variables
+    
+    # Context
+    market_change = realtime_data.get('market_index_change', 0)
+    market_theme = realtime_data.get('market_theme', realtime_data.get('sector', '未知')) # Use Sector as Theme proxy if Global Theme not avail
+    
+    # Target
+    etf_name = f"{stock_info['name']} ({stock_info['symbol']})"
+    price = realtime_data.get('price', tech_data.get('close', 0))
+    change_pct = realtime_data.get('change_pct', 0)
+    
+    vol_ratio = realtime_data.get('volume_ratio', tech_data.get('volume_ratio', 0))
+    # Vol Status Logic
+    if vol_ratio > 2.0: vol_status = "放量"
+    elif vol_ratio < 0.8: vol_status = "缩量"
+    else: vol_status = "正常"
+    
+    # Relative Strength (Simple: Stock Change - Market Change)
+    rel_strength_val = change_pct - market_change
+    if rel_strength_val > 0.5: rel_strength = "跑赢"
+    elif rel_strength_val < -0.5: rel_strength = "跑输"
+    else: rel_strength = "跟随"
+    
+    # Technicals
+    ma20 = tech_data.get('ma20', 0)
+    ma60 = tech_data.get('ma60', 0)
+    
+    # Position vs MA20
+    if price > ma20: pos_ma20 = "MA20上方 (支撑)"
+    elif price < ma20: pos_ma20 = "MA20下方 (压制)"
+    else: pos_ma20 = "MA20附近"
+    
+    # MACD
+    dif = tech_data.get('macd_dif', 0)
+    dea = tech_data.get('macd_dea', 0)
+    if dif > dea: macd_status = "金叉"
+    elif dif < dea: macd_status = "死叉"
+    else: macd_status = "粘合"
+    if dif > 0 and dea > 0: macd_status += " (零轴上方)"
+    else: macd_status += " (零轴下方)"
+    
+    rsi = tech_data.get('rsi', 50)
+    
+    # Fund Flow
+    funds = realtime_data.get('money_flow', {})
+    if funds and funds.get('status') == 'success':
+        net_main = funds.get('net_amount_main', 0) / 10000
+        fund_flow = f"主力净流入 {net_main:.0f}万"
+    else:
+        fund_flow = "暂无数据"
+
+    # News Sentiment
+    # We just pass the summary and ask LLM to evaluate score.
+    news_summary = realtime_data.get('news_summary', "暂无特殊消息")
+    sentiment_score = "请模型根据新闻内容自行评估" 
+    
+    # 2. Fill Template
+    prompt = f"""# Role
+你是一个专注于A股市场的量化交易决策系统。你的核心逻辑是“右侧交易”结合“板块轮动”。你的风格是：客观、严守纪律、厌恶回撤。
+
+# Input Data
+## 1. 市场环境 (Context)
+- 上证指数涨跌幅：{market_change}%
+- 市场核心主线/所属板块：{market_theme}
+
+## 2. 标的实时数据 (Target: {etf_name})
+- 现价：{price} (涨跌: {change_pct}%)
+- 成交量能：量比 {vol_ratio}，当前成交额状态 ({vol_status})
+- 相对强弱：相对于上证指数 {rel_strength}
+
+## 3. 技术指标 (Technical Indicators)
+- 均线系统：
+    - MA20 (生命线): {ma20} (现价在 {pos_ma20})
+    - MA60 (牛熊线): {ma60}
+- 动量指标：
+    - MACD：{macd_status}
+    - RSI(14)：{rsi}
+- 资金/筹码：
+    - 主力资金流向：{fund_flow}
+
+## 4. 资讯情绪 (News Sentiment)
+- 关键摘要：{news_summary}
+- 请根据摘要自行评估综合情绪分 (-10 到 +10)
+
+# ETF Specific Decision Logic (ETF 专属决策逻辑)
+1. **轮动核心 (Rotation Rule)**：
+   - 比较对象：当前 ETF vs 沪深300 (或上证指数)。
+   - 规则：如果连续 3 日 `相对强弱` 为“跑输”，且缺乏重大利好资讯支撑，建议【换仓】(Switch)。
+2. **波动敏感度 (Sensitivity)**：
+   - 噪音过滤：日内涨跌幅绝对值 < 0.8% 视为震荡，原则上【不操作】。
+   - 趋势确认：只有当涨跌幅 > 1.2% 且配合量能放大，才视为有效突破/破位。
+3. **网格/定投视角 (Grid Trading)**：
+   - 不同于个股的止损逻辑，ETF 不会归零。
+   - 如果 价格 < MA60 但 RSI < 30 (超卖)，且新闻面无根本性利空，**禁止**发出强力止损信号，应提示【左侧观察】或【分批补仓】。
+4. **折溢价风控 (Premium Check)**：
+   - (如果你能获取IOPV数据) 如果当前价格溢价率 > 3% (通常发生在跨境或停牌股复牌)，提示【追高风险】，禁止买入。
+
+# Output Format
+请严格按照以下步骤思考，并输出 JSON 格式结果：
+1. **分析思考 (Thinking)**：简要分析量价关系、指标配合情况以及新闻对盘面的支撑。
+2. **态势定义 (Status)**：用 4 个字概括 (如：放量杀跌、缩量企稳、多头排列)。
+3. **操作指令 (Action)**：只能从 [STRONG_BUY, BUY, HOLD, SELL, STRONG_SELL, WAIT] 中选择一个。
+4. **风控建议 (Risk_Tip)**：如果指令是买入，给出止损位；如果指令是持有，给出预警位。
+
+# Output Example
+{{
+  "thinking": "当前价格虽然回踩MA20，但量能极度萎缩，说明抛压不重。结合新闻面'设备更新'利好，且MACD处于零轴上方，判断为良性回调。",
+  "status": "缩量回踩",
+  "action": "HOLD",
+  "risk_tip": "关注MA20支撑，跌破{ma20}止损。"
+}}
+"""
+    return prompt
+
+
+
+def create_deep_candidate_prompt(stock_info: Dict[str, Any], tech_data: Dict[str, Any], realtime_data: Dict[str, Any]) -> str:
+    """
+    Create a DEEP MONITOR prompt for A-share stocks using 'deep_monitor' template.
+    """
+    # Ensure money_flow safety for template access
+    if not realtime_data.get('money_flow'):
+        realtime_data['money_flow'] = {}
+
+    # --- Prepare Computed Context (Shared with Speculator Mode) ---
+    # Use Realtime Price if available, else tech_data close
+    price = realtime_data.get('price', tech_data.get('close', 0))
+    if price == 0: price = tech_data.get('close', 0)
+    
+    # Position Logic
+    ma5 = tech_data.get('ma5')
+    ma20 = tech_data.get('ma20')
+    ma5_pos = "上方" if ma5 and price > ma5 else "下方"
+    ma20_pos = "上方" if ma20 and price > ma20 else "下方"
+    
+    # Resistance/Support
+    res = tech_data.get('resistance', tech_data.get('pivot_point', price * 1.1)) # Fallback
+    sup = tech_data.get('support', tech_data.get('s1', price * 0.9))
+    
+    # Extract strengths from score_details
+    details = tech_data.get('score_details', [])
+    # Filter only "✅" items
+    strengths = [d.replace('✅ ', '') for d in details if '✅' in d]
+    strength_str = ", ".join(strengths[:3]) if strengths else "暂无明显优势"
+    
+    computed = {
+        'ma5_pos': ma5_pos,
+        'ma20_pos': ma20_pos,
+        'res': f"{res:.2f}",
+        'sup': f"{sup:.2f}",
+        'strength_str': strength_str
+    }
+        
+    db_prompt = get_prompt_from_db('deep_monitor', {
         'stock_info': stock_info,
         'tech_data': tech_data,
-        'realtime_data': realtime_data
+        'realtime_data': realtime_data,
+        'computed': computed
     })
     
     if db_prompt:
         return db_prompt
 
-    return "DB Error: realtime_etf_dca prompt not found."
+    return "DB Error: deep_monitor prompt not found."
 
 
 def create_realtime_crypto_prompt(stock_info: Dict[str, Any], history_data: Dict[str, Any], realtime_data: Dict[str, Any]) -> str:
@@ -263,7 +529,10 @@ def create_realtime_future_prompt(stock_info: Dict[str, Any], history_data: Dict
     return "DB Error: realtime_future prompt not found."
 
 
-def create_analysis_prompt(stock_info: Dict[str, Any], tech_data: Dict[str, Any], analysis_type: str = "holding", realtime_data: Dict[str, Any] = None) -> str:
+    return "DB Error: realtime_future prompt not found."
+
+
+def create_analysis_prompt(stock_info: Dict[str, Any], tech_data: Dict[str, Any], analysis_type: str = "holding", realtime_data: Dict[str, Any] = None, market_context: Dict[str, Any] = None) -> str:
     """
     Dispatcher for prompt creation.
     """
@@ -273,134 +542,8 @@ def create_analysis_prompt(stock_info: Dict[str, Any], tech_data: Dict[str, Any]
     asset_type = stock_info.get('asset_type', stock_info.get('type', 'stock'))
     is_etf = (asset_type == 'etf')
 
-    if analysis_type == "realtime":
-        if asset_type == 'crypto':
-            return create_realtime_crypto_prompt(stock_info, tech_data, realtime_data)
-        elif asset_type == 'future':
-            return create_realtime_future_prompt(stock_info, tech_data, realtime_data)
-        elif is_etf:
-            return create_realtime_etf_prompt(stock_info, tech_data, realtime_data)
-        else:
-            return create_realtime_prompt(stock_info, tech_data, realtime_data)
-            
-def create_deep_candidate_prompt(stock_info: Dict[str, Any], tech_data: Dict[str, Any], realtime_data: Dict[str, Any]) -> str:
-    """
-    Create a DEEP EVALUATION prompt for REAL-TIME analysis.
-    Uses DB 'deep_monitor' strategy.
-    """
-    # 1. Unpack Data and Prepare Computed Context
-    score = tech_data.get('composite_score', 0)
-    score_breakdown = tech_data.get('score_breakdown', [])
-    
-    funds = realtime_data.get('money_flow', {})
-    lhb = realtime_data.get('lhb_data', {})
-    
-    # Format Score details
-    score_str = ""
-    if score_breakdown:
-        score_str = ", ".join([f"{item}:{got}/{total}" for item, got, total in score_breakdown])
-    
-    # Format Funds
-    funds_str = "暂无数据"
-    if funds.get('status') == 'success':
-        net_main = funds.get('net_amount_main', 0) / 10000
-        net_main_str = f"{net_main:.2f}万" if abs(net_main) < 10000 else f"{net_main/10000:.2f}亿"
-        funds_str = f"主力净流入: {net_main_str} (占比{funds.get('net_pct_main', 0)}%)"
-        
-    # Format LHB
-    lhb_str = "近期未上榜"
-    if lhb.get('on_list'):
-        net = lhb.get('net_amount', 0) / 10000
-        net_str = f"{net:.2f}万" if abs(net) < 10000 else f"{net/10000:.2f}亿"
-        lhb_str = f"上榜日期: {lhb.get('date')}, 净买入: {net_str}, 机构席位: {lhb.get('jg_count')}家"
-
-    # --- Data Refinement for Prompt ---
-    # 1. Scenario Thresholds (Fix 0 value issue)
-    current_price = realtime_data.get('price', 0)
-    high_val = realtime_data.get('high', 0)
-    low_val = realtime_data.get('low', 0)
-    
-    if high_val == 0 and current_price > 0: 
-        high_val = round(current_price * 1.02, 2) # Est +2%
-    if low_val == 0 and current_price > 0:
-        low_val = round(current_price * 0.98, 2)  # Est -2%
-        
-    # --- Refined Technical Indicators ---
-    
-    # 2. MA Arrangement & Pattern
-    ma_str = tech_data.get('ma_arrangement')
-    if not ma_str or ma_str == 'None':
-        ma5 = tech_data.get('ma5')
-        ma10 = tech_data.get('ma10')
-        ma20 = tech_data.get('ma20')
-        if ma5 and ma10 and ma20:
-             if ma5 > ma10 > ma20: ma_str = "多头排列"
-             elif ma5 < ma10 < ma20: ma_str = "空头排列"
-             else: ma_str = "震荡交织"
-        else:
-             ma_str = "均线粘合/未知" # Fallback if data missing
-
-    # 3. Calculate Resistance/Support
-    price = tech_data.get('close', current_price)
-    res = tech_data.get('resistance')
-    if not res: res = tech_data.get('pivot_point')
-    if not res: res = price * 1.1 # Last resort fallback
-
-    sup = tech_data.get('support') 
-    if not sup: sup = tech_data.get('s1')
-    if not sup: sup = price * 0.9
-
-    # 4. Extended Tech Indicators
-    ma60 = tech_data.get('ma60', 0)
-    vol_ratio = tech_data.get('volume_ratio', realtime_data.get('volume_ratio', 'N/A'))
-    rsi = tech_data.get('rsi', 'N/A')
-    
-    macd_str = "N/A"
-    dif = tech_data.get('macd_dif')
-    dea = tech_data.get('macd_dea')
-    if dif is not None and dea is not None:
-        macd_str = "金叉" if dif > dea else "死叉"
-        if dif > 0 and dea > 0: macd_str += " (零轴上)"
-        else: macd_str += " (零轴下)"
-
-    computed = {
-        'score_str': score_str,
-        'funds_str': funds_str,
-        'lhb_str': lhb_str,
-        'high_val': high_val,
-        'low_val': low_val,
-        'ma_str': ma_str,
-        'ma60': ma60,
-        'res': f"{res:.2f}",
-        'sup': f"{sup:.2f}",
-        'vol_ratio': vol_ratio,
-        'rsi': rsi,
-        'macd_str': macd_str,
-        'sector': tech_data.get('sector', '未知板块'),
-        'sector_change': tech_data.get('sector_change', 0)
-    }
-
-    db_prompt = get_prompt_from_db('deep_monitor', {
-        'stock_info': stock_info,
-        'tech_data': tech_data,
-        'realtime_data': realtime_data,
-        'computed': computed
-    })
-    
-    if db_prompt:
-        return db_prompt
-
-    return "DB Error: deep_monitor prompt not found."
-
-def create_analysis_prompt(stock_info: Dict[str, Any], tech_data: Dict[str, Any], analysis_type: str = "holding", realtime_data: Dict[str, Any] = None) -> str:
-    """
-    Dispatcher for prompt creation.
-    """
-    # Use explicitly configured asset_type (from config), usually 'etf' or 'stock'
-    # 'stock' is default if not specified
-    # Also support 'type' field from raw config
-    asset_type = stock_info.get('asset_type', stock_info.get('type', 'stock'))
-    is_etf = (asset_type == 'etf')
+    if analysis_type == "intraday":
+        return create_intraday_prompt(stock_info, tech_data, realtime_data, market_context)
 
     if analysis_type == "realtime":
         if asset_type == 'crypto':
@@ -410,7 +553,11 @@ def create_analysis_prompt(stock_info: Dict[str, Any], tech_data: Dict[str, Any]
         elif is_etf:
             return create_realtime_etf_prompt(stock_info, tech_data, realtime_data)
         else:
-            # Upgrade: Use Deep Candidate Prompt for Stocks
+            # A股专家分析
+            print("stock_info", stock_info)
+            print("tech_data", tech_data)
+            print("realtime_data", realtime_data)
+            print("market_context", market_context)
             return create_deep_candidate_prompt(stock_info, tech_data, realtime_data)
             
     elif analysis_type == "candidate":
@@ -429,6 +576,8 @@ def create_analysis_prompt(stock_info: Dict[str, Any], tech_data: Dict[str, Any]
             return create_risk_prompt(stock_info, tech_data)
 
 
+
+
 def generate_analysis_gemini(
     stock_info: Dict[str, Any],
     tech_data: Dict[str, Any],
@@ -437,7 +586,8 @@ def generate_analysis_gemini(
     credentials_path: str = None,
     model: str = "gemini-2.5-flash",
     analysis_type: str = "holding",
-    realtime_data: Dict[str, Any] = None
+    realtime_data: Dict[str, Any] = None,
+    market_context: Dict[str, Any] = None
 ) -> str:
     """
     Generate LLM-based trading analysis using Google Gemini
@@ -451,13 +601,14 @@ def generate_analysis_gemini(
         if credentials_path and os.path.exists(credentials_path):
             os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = credentials_path
         
+        
         client = genai.Client(
             vertexai=True,
             project=project_id,
             location=location
         )
         
-        prompt = create_analysis_prompt(stock_info, tech_data, analysis_type, realtime_data)
+        prompt = create_analysis_prompt(stock_info, tech_data, analysis_type, realtime_data, market_context)
         
         # Log the full prompt
         print(f"\n======== [Gemini Prompt Debug ({analysis_type})] ========\n{prompt}\n=========================================================\n")
@@ -526,7 +677,8 @@ def generate_analysis_openai(
     model: str = "deepseek-chat",
     analysis_type: str = "holding",
     realtime_data: Dict[str, Any] = None,
-    provider: str = "openai"
+    provider: str = "openai",
+    market_context: Dict[str, Any] = None
 ) -> str:
     """
     Generate LLM-based trading analysis using OpenAI-compatible API
@@ -537,7 +689,7 @@ def generate_analysis_openai(
             base_url=base_url
         )
         
-        prompt = create_analysis_prompt(stock_info, tech_data, analysis_type, realtime_data)
+        prompt = create_analysis_prompt(stock_info, tech_data, analysis_type, realtime_data, market_context=market_context)
         
         # Log the full prompt
         print(f"\n======== [OpenAI Prompt Debug ({analysis_type})] ========\n{prompt}\n=========================================================\n")
@@ -607,7 +759,8 @@ def generate_analysis(
     tech_data: Dict[str, Any],
     api_config: Dict[str, Any],
     analysis_type: str = "holding",
-    realtime_data: Dict[str, Any] = None
+    realtime_data: Dict[str, Any] = None,
+    market_context: Dict[str, Any] = None
 ) -> str:
     """
     Generate LLM-based trading analysis (supports multiple providers)
@@ -623,7 +776,8 @@ def generate_analysis(
             credentials_path=api_config.get('credentials_path'),
             model=api_config.get('model', 'gemini-2.5-flash'),
             analysis_type=analysis_type,
-            realtime_data=realtime_data
+            realtime_data=realtime_data,
+            market_context=market_context
         )
     else:
         # OpenAI 兼容的 API（包括 OpenAI, DeepSeek, GLM 等）
@@ -635,7 +789,8 @@ def generate_analysis(
             model=api_config['model'],
             analysis_type=analysis_type,
             realtime_data=realtime_data,
-            provider=provider
+            provider=provider,
+            market_context=market_context
         )
 
 

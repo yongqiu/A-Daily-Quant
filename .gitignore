@@ -46,5 +46,9 @@ Thumbs.db
 !README.md
 *.html
 
+*.log
 test_*.py
+debug_*.py
+verify_*.py
 config.json
+scripts

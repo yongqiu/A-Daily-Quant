@@ -348,17 +348,23 @@
           <div class="flex-shrink-0 px-4 pt-2 border-b border-border-subtle bg-bg/95 backdrop-blur z-10 sticky top-0">
                <div class="flex items-center justify-between mb-0">
                    <div class="flex items-center gap-6">
+                      <button @click="switchTab('single_expert')"
+                               class="pb-3 px-1 text-sm font-medium border-b-2 transition-colors relative"
+                               :class="activeAnalyzerTab === 'single_expert' ? 'text-primary border-primary' : 'text-text-tertiary border-transparent hover:text-text-secondary'">
+                         专家诊断
+                         <span v-if="activeAnalyzerTab === 'single_expert' && (analyzing || loadingAnalysis)" class="absolute top-1 right-[-6px] w-1.5 h-1.5 rounded-full bg-primary animate-pulse"></span>
+                       </button>
                        <button @click="switchTab('multi_agent')"
                                class="pb-3 px-1 text-sm font-medium border-b-2 transition-colors relative"
                                :class="activeAnalyzerTab === 'multi_agent' ? 'text-primary border-primary' : 'text-text-tertiary border-transparent hover:text-text-secondary'">
                          多空辩论
                          <span v-if="activeAnalyzerTab === 'multi_agent' && (analyzing || loadingAnalysis)" class="absolute top-1 right-[-6px] w-1.5 h-1.5 rounded-full bg-primary animate-pulse"></span>
                        </button>
-                       <button @click="switchTab('single_expert')"
+                       <button @click="switchTab('intraday')"
                                class="pb-3 px-1 text-sm font-medium border-b-2 transition-colors relative"
-                               :class="activeAnalyzerTab === 'single_expert' ? 'text-primary border-primary' : 'text-text-tertiary border-transparent hover:text-text-secondary'">
-                         专家诊断
-                         <span v-if="activeAnalyzerTab === 'single_expert' && (analyzing || loadingAnalysis)" class="absolute top-1 right-[-6px] w-1.5 h-1.5 rounded-full bg-primary animate-pulse"></span>
+                               :class="activeAnalyzerTab === 'intraday' ? 'text-primary border-primary' : 'text-text-tertiary border-transparent hover:text-text-secondary'">
+                         盘中分析
+                         <span v-if="activeAnalyzerTab === 'intraday' && (analyzing || loadingAnalysis)" class="absolute top-1 right-[-6px] w-1.5 h-1.5 rounded-full bg-primary animate-pulse"></span>
                        </button>
                    </div>
                    
@@ -381,7 +387,7 @@
                  <div class="flex-shrink-0 mb-4 flex justify-between items-center border-b border-border-subtle pb-3">
                     <h3 class="text-sm font-bold text-text-primary m-0 flex items-center gap-2">
                         <span class="w-1.5 h-4 bg-primary rounded-full"></span>
-                        {{ activeAnalyzerTab === 'multi_agent' ? 'AI多空辩论分析报告' : 'AI专家诊断报告' }}
+                        {{ activeAnalyzerTab === 'multi_agent' ? 'AI多空辩论分析报告' : (activeAnalyzerTab === 'intraday' ? 'AI盘中实时分析' : 'AI专家诊断报告') }}
                     </h3>
                     
                     <button @click="runAIAnalysis" :disabled="analyzing || loadingAnalysis" 
@@ -468,7 +474,7 @@ const showAddHoldingModal = ref(false)
 const showEditHoldingModal = ref(false)
 const stockToEdit = ref(null)
 const loadingAnalysis = ref(false)
-const activeAnalyzerTab = ref('multi_agent') // 'multi_agent' or 'single_expert'
+const activeAnalyzerTab = ref('single_expert') // 'multi_agent' or 'single_expert'
 const availableAnalysisDates = ref([])
 const selectedAnalysisDate = ref(null)
 
@@ -689,20 +695,20 @@ const runAIAnalysis = async () => {
   let accumulatedMarkdown = ''
 
   try {
-    await apiMethods.analyzeStockStream(
-      selectedStockSymbol.value,
-      activeAnalyzerTab.value,
-      (data) => {
+    const onProgress = (data) => {
         if (data.type === 'progress' || data.type === 'step') {
           analysisProgress.value = data.message || data.content
         } else if (data.type === 'token') {
           accumulatedMarkdown += data.content
           analysisResult.value = marked.parse(accumulatedMarkdown)
         }
-      },
-      (data) => {
+    }
+    const onComplete = (data) => {
         if (data.type === 'final_html') {
           analysisResult.value = marked.parse(data.content)
+        } else if (data.type === 'result') {
+          // Some endpoints return result
+           analysisResult.value = marked.parse(data.content)
         }
         if (data.type === 'complete') {
           analyzing.value = false
@@ -710,16 +716,34 @@ const runAIAnalysis = async () => {
           // Reload from database to ensure we have the latest saved version
           setTimeout(() => {
               loadAnalysisDates(selectedStockSymbol.value)
-              loadLatestAnalysis(selectedStockSymbol.value)
+              if (activeAnalyzerTab.value !== 'intraday') {
+                  loadLatestAnalysis(selectedStockSymbol.value)
+              }
           }, 500)
         }
-      },
-      (error) => {
+    }
+    const onError = (error) => {
         console.error('Analysis failed:', error)
         analysisResult.value = `<div class="p-3 rounded-lg bg-danger/10 border border-danger/30 text-danger text-xs">分析失败: ${error.message}</div>`
         analyzing.value = false
-      }
-    )
+    }
+
+    if (activeAnalyzerTab.value === 'intraday') {
+         await apiMethods.analyzeIntraday(
+             selectedStockSymbol.value,
+             onProgress,
+             onComplete,
+             onError
+         )
+    } else {
+        await apiMethods.analyzeStockStream(
+          selectedStockSymbol.value,
+          activeAnalyzerTab.value,
+          onProgress,
+          onComplete,
+          onError
+        )
+    }
   } catch (error) {
     console.error('Analysis failed:', error)
     analyzing.value = false

@@ -108,7 +108,11 @@ def get_market_snapshot_tencent() -> pd.DataFrame:
                         'mcap_float': float(parts[44]) * 100000000 if parts[44] else 0,
                         # Add extra fields if needed
                         'volume': float(parts[36]) * 100, # Hand -> Share
-                        'amount': float(parts[37]) * 10000 # 10k -> Unit? Usually 'Wan'
+                        'amount': float(parts[37]) * 10000, # 10k -> Unit? Usually 'Wan'
+                        'open': float(parts[5]),
+                        'pre_close': float(parts[4]),
+                        'high': float(parts[33]),
+                        'low': float(parts[34])
                     }
                     all_data.append(data)
                 except (ValueError, IndexError):
@@ -121,3 +125,110 @@ def get_market_snapshot_tencent() -> pd.DataFrame:
     df = pd.DataFrame(all_data)
     print(f"✅ Fetched snapshot for {len(df)} stocks via Tencent.")
     return df
+
+def get_stock_realtime_tx(symbol: str) -> dict:
+    """
+    Get real-time data for a SINGLE stock from Tencent.
+    支持输入: 
+    - 纯数字代码: '000001', '603599', '399001'
+    - 带市场前缀: 'sh000001', 'sz000001', 'sz399001'
+    """
+    # 1. 检查是否已经带有市场前缀
+    str_code = str(symbol).lower().strip()
+    
+    if str_code.startswith(('sh', 'sz', 'bj')):
+        # 已经带前缀，直接使用
+        tx_code = str_code
+    else:
+        # 纯数字代码，根据规则添加前缀
+        # 6/68 开头 -> 上海
+        # 0/3 开头 -> 深圳
+        # 4/8 开头 -> 北京
+        if str_code.startswith('6'):
+            tx_code = f"sh{str_code}"
+        elif str_code.startswith('0') or str_code.startswith('3'):
+            tx_code = f"sz{str_code}"
+        elif str_code.startswith('4') or str_code.startswith('8'):
+            tx_code = f"bj{str_code}"
+        else:
+            print(f"⚠️ Unknown symbol format: {symbol}")
+            return None
+        
+    url = f"http://qt.gtimg.cn/q={tx_code}"
+    
+    try:
+        resp = requests.get(url, timeout=3)
+        if resp.status_code != 200:
+            return None
+            
+        resp.encoding = 'gbk'
+        line = resp.text.strip()
+        
+        # v_sh600000="浦发银行~600000~9.49~9.51~9.48~9.45~9.44~480665~45544~379684128~9.49~..."
+        if not line or '~' not in line:
+            return None
+            
+        parts = line.split('~')
+        if len(parts) < 45:
+            return None
+            
+        # Calculate VWAP
+        amount_wan = float(parts[37]) if parts[37] else 0
+        volume_hand = float(parts[36]) if parts[36] else 0
+        vwap = 0.0
+        if volume_hand > 0:
+            vwap = (amount_wan * 10000) / (volume_hand * 100)
+            
+        # Order Book Analysis
+        bid_vols = []
+        ask_vols = []
+        
+        for i in range(5):
+            # Bids
+            b_idx = 10 + i * 2
+            if len(parts) > b_idx and parts[b_idx]:
+                bid_vols.append(int(parts[b_idx]))
+            
+            # Asks
+            a_idx = 20 + i * 2
+            if len(parts) > a_idx and parts[a_idx]:
+                ask_vols.append(int(parts[a_idx]))
+
+        total_bid_vol = sum(bid_vols)
+        total_ask_vol = sum(ask_vols)
+        
+        # WeiBi
+        weibi = 0.0
+        if total_bid_vol + total_ask_vol > 0:
+            weibi = (total_bid_vol - total_ask_vol) / (total_bid_vol + total_ask_vol) * 100
+
+        data = {
+
+            'symbol': parts[2],
+            'name': parts[1],
+            'price': float(parts[3]),
+            'change_pct': float(parts[32]),
+            'volume_ratio': float(parts[49]) if parts[49] else 0,
+            'turnover_rate': float(parts[38]) if parts[38] else 0,
+            'pe_ttm': float(parts[39]) if parts[39] else 0,
+            'mcap_float': float(parts[44]) * 100000000 if parts[44] else 0,
+            'volume': float(parts[36]) * 100,
+            'amount': float(parts[37]) * 10000,
+            'open': float(parts[5]),
+            'pre_close': float(parts[4]),
+            'high': float(parts[33]),
+            'low': float(parts[34]),
+            'bid1': float(parts[9]) if parts[9] else 0,
+            'bid1_vol': int(parts[10]) if parts[10] else 0,
+            'ask1': float(parts[19]) if parts[19] else 0,
+            'ask1_vol': int(parts[20]) if parts[20] else 0,
+            'vwap': round(vwap, 3),
+            'weibi': round(weibi, 2),
+            'bid_vols': bid_vols,
+            'ask_vols': ask_vols
+        }
+        return data
+        
+    except Exception as e:
+        print(f"❌ Error fetching {symbol} from Tencent: {e}")
+        return None

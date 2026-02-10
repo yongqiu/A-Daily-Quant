@@ -53,7 +53,7 @@ export const apiMethods = {
   getKline: (symbol) => api.get(`/kline/${symbol}`),
 
   // 分析
-  analyzeStock: (symbol) => api.post(`/analyze/${symbol}`),
+
 
   calculateStockScore: (symbol) => api.post(`/analyze/${symbol}/score`),
 
@@ -64,6 +64,43 @@ export const apiMethods = {
 
   analyzeStockStream: async (symbol, mode = 'multi_agent', onProgress, onComplete, onError) => {
     const response = await fetch(`/api/analyze/${symbol}/report/stream?mode=${mode}`)
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        const chunk = decoder.decode(value)
+        const lines = chunk.split('\n')
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6))
+              if (data.type === 'progress' || data.type === 'step' || data.type === 'token') {
+                onProgress?.(data)
+              } else if (data.type === 'final_html' || data.type === 'result') {
+                onComplete?.(data)
+              } else if (data.type === 'complete') {
+                onComplete?.(data)
+              } else if (data.type === 'error') {
+                onError?.(data)
+              }
+            } catch (e) {
+              // Ignore parse errors
+            }
+          }
+        }
+      }
+    } catch (error) {
+      onError?.(error)
+    }
+  },
+
+  analyzeIntraday: async (symbol, onProgress, onComplete, onError) => {
+    const response = await fetch(`/api/analyze/${symbol}/intraday`)
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
 

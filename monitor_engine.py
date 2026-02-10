@@ -25,6 +25,7 @@ from data_fetcher import (
 from indicator_calc import calculate_indicators, get_latest_metrics
 from llm_analyst import generate_analysis
 from etf_score import apply_etf_score
+from data_fetcher_ts import fetch_index_daily_ts, fetch_daily_basic_ts
 import database
 
 # --- Configuration ---
@@ -421,6 +422,11 @@ class MonitorEngine:
         self.last_update = None
         self.cache = {}
         self.ai_cache = {} # Store LLM analysis results: {symbol: "Analysis text..."}
+        self.market_history_cache = {
+            "data": None,
+            "timestamp": None
+        }
+
         
     def load_config(self):
         """Proxy to module-level load_config"""
@@ -502,112 +508,38 @@ class MonitorEngine:
         print(f"🎯 Watch list updated: {len(self.targets)} targets loaded.")
         return len(self.targets)
 
-    def run_ai_analysis_for_target(self, symbol: str) -> str:
+    def get_market_history_cached(self) -> Optional[pd.DataFrame]:
         """
-        Run deep AI analysis for a specific target.
-        Combines History + Realtime + Funds + Sector + Score Breakdown.
+        Get cached market index history (Shanghai Composite).
+        Cache validity: 10 minutes.
         """
-        print(f"🧠 Running Deep AI Analysis for {symbol}...")
+        now = datetime.now()
+        cache = self.market_history_cache
         
-        # 1. Find target info
-        target = next((t for t in self.targets if t['symbol'] == symbol), None)
-        if not target:
-            # Try to construct basic target if not in list (e.g. ad-hoc analysis)
-            target = {'symbol': symbol, 'asset_type': 'stock', 'name': symbol}
-            
-        # 2. Get Realtime Data
-        rt_dict = get_realtime_data([target])
-        rt_data = rt_dict.get(symbol)
-        if not rt_data:
-            return "Realtime data unavailable"
-            
-        # 3. Get Historical Data & Indicators & Score
-        try:
-            start_date = calculate_start_date()
-            df = fetch_data_dispatcher(symbol, target.get('asset_type', 'stock'), start_date)
-            
-            if df is None or df.empty:
-                return "Historical data unavailable"
-            
-            df = calculate_indicators(df)
-            tech_data = get_latest_metrics(df) # Base metrics
-            
-            if not tech_data:
-                return "Indicator calculation failed"
-            
-            # Apply ETF-specific scoring if asset_type is 'etf'
-            if target.get('asset_type') == 'etf':
-                tech_data = apply_etf_score(tech_data)
-            
-            # Ensure score details are present (indicator_calc should have them)
-            # tech_data['score_breakdown'] contains list of (item, score, max)
-        except Exception as e:
-            print(f"❌ Error fetching history for {symbol}: {e}")
-            return f"Data Error: {str(e)}"
-            
-        # 4. Enhanced Data Fetching (New Dimensions)
-        # A. Market Context
-        market_index = self.get_market_index()
-        rt_data['market_index_price'] = market_index['price']
-        rt_data['market_index_change'] = market_index['change_pct']
-        rt_data['market_index_status'] = "Strong" if market_index['change_pct'] > 0.5 else ("Weak" if market_index['change_pct'] < -0.5 else "Neutral")
+        # Check cache validity (10 mins)
+        if cache["data"] is not None and cache["timestamp"]:
+            if (now - cache["timestamp"]).total_seconds() < 600:
+                pass # Valid
+            else:
+                cache["data"] = None # Expired
         
-        # B. Sector Data
-        # We need to match sector name.
-        if 'sector' not in target:
-             # Try to load map
-             sector_map = load_sector_map()
-             if sector_map and symbol in sector_map:
-                 target['sector'] = sector_map[symbol]
-        
-        sector_name = target.get('sector', 'N/A')
-        sector_change = 0.0
-        
-        if sector_name and sector_name != 'N/A':
-            sector_change = get_sector_performance(sector_name)
+        if cache["data"] is None:
+            # Fetch fresh data (30 days to ensure enough for MA20)
+            start_date = (now - timedelta(days=40)).strftime('%Y%m%d')
+            print("📉 Fetching fresh Market Index History (000001.SH)...")
+            df = fetch_index_daily_ts('000001.SH', start_date=start_date)
             
-        rt_data['sector'] = sector_name
-        rt_data['sector_change'] = sector_change
-        
-        # Calculate Rank if feasible (Optional, maybe too slow for realtime single target?)
-        # For now, we leave rank as default N/A or rely on tech_data having it if we ran a full screen recently.
-        if 'rank_in_sector' not in rt_data:
-             rt_data['rank_in_sector'] = tech_data.get('rank_in_sector', 'N/A')
+            if df is not None and not df.empty:
+                cache["data"] = df
+                cache["timestamp"] = now
+            else:
+                return None
+                
+        return cache["data"]
 
-        # C. Money Flow & LHB
-        money_flow = fetch_money_flow(symbol)
-        lhb_data = fetch_dragon_tiger_data(symbol)
-        
-        # Inject into realtime_data or tech_data dictionary for Prompt
-        rt_data['money_flow'] = money_flow
-        rt_data['lhb_data'] = lhb_data
-        
-        # D. Basic Fundamentals (if available from source, or just rely on what we have)
-        # We have pe_ttm, mcap_float, turnover from snapshot/info if we fetched it.
-        # Some are already in tech_data/rt_data if `stock_individual_info_em` was used.
 
-        # 5. Call LLM
-        # Determine provider config
-        provider = self.config['api'].get('provider', 'openai')
-        api_config_key = f"api_{provider}"
-        api_config = self.config.get(api_config_key, self.config['api'])
-        
-        try:
-            # Pass asset_type info to LLM
-            # target already includes 'asset_type' from refresh_targets logic
-            analysis = generate_analysis(
-                stock_info=target,
-                tech_data=tech_data,
-                api_config=api_config,
-                analysis_type="realtime",
-                realtime_data=rt_data
-            )
-            # Update cache
-            self.ai_cache[symbol] = analysis
-            return analysis
-        except Exception as e:
-            print(f"❌ LLM Error: {e}")
-            return f"AI Error: {str(e)}"
+
+
 
     def run_check(self):
         """Execute one round of checks"""
