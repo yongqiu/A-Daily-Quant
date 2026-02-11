@@ -19,15 +19,18 @@
 
 区别于传统的量化框架，本项目深度融合了 **LLM (大语言模型)** 能力，能够像专业投顾一样，结合技术指标与市场情绪，为你提供有逻辑、有温度的交易建议。
 
-## ✨ 核心特性
+## 核心特性
 
-*   **🧠 AI 智脑 (Agent Analyst)**: 集成 OpenAI/Gemini/DeepSeek 等大模型，对持仓和标的进行深度复盘与预测。
-*   **📊 量化筛选 (Quant Screener)**: 基于“趋势跟踪 + 资金共振”逻辑，每日自动扫描全市场，捕捉强势股。
-*   **🛡️ 动态风控 (Risk Shield)**: 独创 Beta Shield 风控模型，根据大盘环境动态调整仓位建议，在大跌前强制空仓。
-*   **📡 实时雷达 (Real-time Monitor)**: Web 可视化看板，实时监控自选股的量比、资金流向与盘口异常。
-*   **📝 自动化研报 (Auto Report)**: 每日盘后自动生成精美的 HTML/Markdown 研报，复盘当日操作与明日计划。
+*   ** AI 智脑 (Agent Analyst)**: 集成 OpenAI/Gemini/DeepSeek 等大模型，对持仓和标的进行深度复盘与预测。
+*   ** 量化筛选 (Quant Screener)**: 基于“趋势跟踪 + 资金共振”逻辑，每日自动扫描全市场，捕捉强势股。
+*   ** 动态风控 (Risk Shield)**: 独创 Beta Shield 风控模型，根据大盘环境动态调整仓位建议，在大跌前强制空仓。
+*   ** 实时雷达 (Real-time Monitor)**: Web 可视化看板，实时监控自选股的量比、资金流向与盘口异常。
+*   ** 自动化研报 (Auto Report)**: 每日盘后自动生成精美的 HTML/Markdown 研报，复盘当日操作与明日计划。
 
-## 🏗️ 系统架构
+  ![Uploading 76DA048A-7D7E-4148-A513-322C363D7E1E.png…]()
+
+
+## 系统架构
 
 ```mermaid
 graph TD
