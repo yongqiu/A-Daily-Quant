@@ -90,7 +90,6 @@ cp config.json.example config.json
   "api": {
     "provider": "gemini-openai"
   },
-  // 下方的大模型api任意配置一个即可
   "api_gemini-openai": {
     "provider": "gemini-openai",
     "api_key": "your-api-key",
