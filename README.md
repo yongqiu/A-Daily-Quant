@@ -77,9 +77,9 @@ cp config.json.example config.json
 {
   "data_source": { 
     "provider": "tushare",
-    "tushare_token": "your-tushare-token" // 可以在tushare官网注册获取，没有tushare积分的话会降级使用akshare、腾讯财经获取，数据质量可能不稳定
+    "tushare_token": "your-tushare-token"
   },
-  "database": { // 数据库配置，用于存储分析报告和promot模板
+  "database": {
     "type": "mysql",
     "host": "localhost",
     "port": 3306,
@@ -88,7 +88,7 @@ cp config.json.example config.json
     "db": "db_daily_strategy"
   },
   "api": {
-    "provider": "gemini-openai" // 这里填写使用的下方的大模型配置，如"deepseek"
+    "provider": "gemini-openai"
   },
   // 下方的大模型api任意配置一个即可
   "api_gemini-openai": {
