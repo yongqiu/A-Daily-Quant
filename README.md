@@ -8,14 +8,14 @@
 </div>
 
 <div align="center">
-  <h3>数据驱动决策 · AI 赋能交易 · 严守风控纪律</h3>
+  <h3>轻量化 · 私有化 · A股市场</h3>
 </div>
 
 ---
 
 ## 📖 项目简介
 
-**A-Daily-Quant** 是一个专为 A 股市场打造的现代化量化决策系统。它不仅仅是一个选股工具，更是一个集成了**数据清洗**、**量化分析**、**AI 深度解读**与**实时风控**的完整交易辅助平台。
+**A-Daily-Quant** 是一个轻量化的、更适合个人定制化使用的、专为 A 股市场打造的现代化量化决策系统。它不仅仅是一个选股工具，更是一个集成了**数据清洗**、**量化分析**、**AI 深度解读**与**实时风控**的完整交易辅助平台。
 
 区别于传统的量化框架，本项目深度融合了 **LLM (大语言模型)** 能力，能够像专业投顾一样，结合技术指标与市场情绪，为你提供有逻辑、有温度的交易建议。
 
@@ -69,25 +69,35 @@ pip install -r requirements.txt
 
 ### 2. 配置说明
 
-在项目根目录创建 `config.json`：
+1. 拷贝配置文件
+cp config.json.example config.json
 
+2. 配置大模型api和tushare的个人token
 ```json
 {
+  "data_source": { 
+    "provider": "tushare",
+    "tushare_token": "your-tushare-token" // 可以在tushare官网注册获取，没有tushare积分的话会降级使用akshare、腾讯财经获取，数据质量可能不稳定
+  },
+  "database": { // 数据库配置，用于存储分析报告和promot模板
+    "type": "mysql",
+    "host": "localhost",
+    "port": 3306,
+    "user": "root",
+    "password": "",
+    "db": "db_daily_strategy"
+  },
   "api": {
-    "provider": "openai",
-    "base_url": "https://api.openai.com/v1",
-    "api_key": "sk-xxxxxxxx",
-    "model": "gpt-4-turbo"
+    "provider": "gemini-openai" // 这里填写使用的下方的大模型配置，如"deepseek"
   },
-  "tushare": {
-    "token": "YOUR_TUSHARE_TOKEN"
-  },
-  "monitor": {
-    "watch_list": [
-      {"symbol": "600519", "name": "贵州茅台"},
-      {"symbol": "510300", "name": "沪深300ETF", "asset_type": "etf"}
-    ]
+  // 下方的大模型api任意配置一个即可
+  "api_gemini-openai": {
+    "provider": "gemini-openai",
+    "api_key": "your-api-key",
+    "base_url": "",
+    "model": "gemini-3-pro-high"
   }
+  //...
 }
 ```
 
