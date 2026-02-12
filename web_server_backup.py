@@ -850,25 +850,66 @@ async def analyze_stock_report_stream(symbol: str, mode: str = "multi_agent"):
                 yield f"data: {json.dumps({'type': 'step', 'content': '✅ 收盘数据提取完成'})}\n\n"
             
             # 通用逻辑：增强的数据获取
-            # --- 使用 ContextBuilder 构建标准市场上下文 ---
-            from context_builder import build_market_context
+            # --- 注入市场上下文 (使用 MonitorEngine 的高级逻辑) ---
+            # 1. 基础指数数据
+            rt_data['market_index_price'] = index_data.get('price')
+            rt_data['market_index_change'] = index_data.get('change_pct')
             
-            # 使用 MonitorEngine 和当前股票代码构建上下文
-            market_context = build_market_context(monitor_engine, symbol)
-            
-            # 为了向后兼容旧代码/前端，仍然注入一些字段到 rt_data (可选，或者清理前端)
-            # 但 AI 分析将主要使用 market_context
-            rt_data['market_index_price'] = market_context['market_index']['price']
-            rt_data['market_index_change'] = market_context['market_index']['change_pct']
-            rt_data['market_status_desc'] = market_context['market_index']['status_desc']
-            rt_data['sector'] = market_context['sector_info']['name']
-            rt_data['sector_change'] = market_context['sector_info']['change_pct']
+            # 2. 计算高级大盘状态 (Trend + Volume)
+            try:
+                # 使用 monitor_engine 的缓存获取历史
+                if hasattr(monitor_engine, 'get_market_history_cached'):
+                    index_df = monitor_engine.get_market_history_cached()
+                else:
+                    index_df = None
+                    
+                if index_df is not None and not index_df.empty:
+                    # Calculate MA5
+                    index_df['ma5'] = index_df['close'].rolling(5).mean()
+                    last_row = index_df.iloc[-1]
+                    
+                    current_price = index_data.get('price') if index_data.get('price', 0) > 0 else last_row['close']
+                    ma5_price = last_row['ma5']
+                    
+                    # Trend
+                    trend = "震荡"
+                    if current_price > ma5_price * 1.005: trend = "上涨"
+                    elif current_price < ma5_price * 0.995: trend = "下跌"
+                    
+                    # Position
+                    pos_desc = "均线上方" if current_price > ma5_price else "均线下方"
+                    
+                    rt_data['market_status_desc'] = f"{trend} ({pos_desc})"
+                else:
+                    # Fallback
+                    status = "Strong" if index_data.get('change_pct', 0) > 0.5 else ("Weak" if index_data.get('change_pct', 0) < -0.5 else "Neutral")
+                    rt_data['market_status_desc'] = f"未知 ({status})"
+            except Exception as e:
+                print(f"Web Market Status Error: {e}")
+                rt_data['market_status_desc'] = "未知"
 
             # 3. (Optional) Re-inject turnover if needed (already done above)
             # just ensuring variables are consistent
             if 'turnover_rate' not in tech_data:
                  tech_data['turnover_rate'] = 'N/A'
             
+            # --- 注入板块信息 ---
+            # 单只股票分析可能会错过选股器中使用的板块资金流，所以我们在这里补充它。
+            sector_map = load_sector_map()
+            sector_name = sector_map.get(symbol, 'N/A')
+            
+            # 如果不在映射中，也许我们可以获取它或保留为 N/A
+            rt_data['sector'] = sector_name
+            tech_data['sector'] = sector_name
+            
+            if sector_name and sector_name != 'N/A':
+                 sector_change = get_sector_performance(sector_name)
+                 rt_data['sector_change'] = sector_change
+                 tech_data['sector_change'] = sector_change
+            else:
+                 rt_data['sector_change'] = 0
+                 tech_data['sector_change'] = 0
+                 
             # 要在没有全市场扫描的情况下即时计算排名很难，设为 'N/A'（或在提示中设为 '未知'）
             tech_data['rank_in_sector'] = 'N/A'
             rt_data['rank_in_sector'] = 'N/A'
@@ -979,8 +1020,7 @@ async def analyze_stock_report_stream(symbol: str, mode: str = "multi_agent"):
                     tech_data=tech_data,
                     api_config=api_config,
                     analysis_type="realtime", # 使用实时提示（简化用于快速分析）
-                    realtime_data=rt_data,
-                    market_context=market_context
+                    realtime_data=rt_data
                 )
                 
                 yield f"data: {json.dumps({'type': 'progress', 'value': 90, 'message': '分析生成完毕，正在排版...'})}\n\n"

@@ -413,7 +413,8 @@
                  </div>
 
                  <!-- Analysis Result -->
-                 <div v-else-if="analysisResult" class="flex-1 pb-5">
+                 <div v-else-if="analysisResult || tradingPlan" class="flex-1 pb-5">
+                   <TradingPlanCard v-if="tradingPlan" :plan="tradingPlan" />
                    <div class="prose max-w-none" v-html="analysisResult"></div>
                  </div>
 
@@ -444,6 +445,7 @@ import { useKlineChart } from '@/composables/useKlineChart'
 import AddHoldingModal from '@/components/AddHoldingModal.vue'
 import EditHoldingModal from '@/components/EditHoldingModal.vue'
 import StockScoreCard from '@/components/StockScoreCard.vue'
+import TradingPlanCard from '@/components/TradingPlanCard.vue'
 import { marked } from 'marked'
 import {
   PlusIcon,
@@ -470,6 +472,7 @@ const scoreResult = ref(null) // Stores the metrics result
 const isScoreExpanded = ref(false)
 const analysisProgress = ref('')
 const analysisResult = ref('')
+const tradingPlan = ref(null)
 const showAddHoldingModal = ref(false)
 const showEditHoldingModal = ref(false)
 const stockToEdit = ref(null)
@@ -520,6 +523,109 @@ const selectStock = (stock) => {
   loadAnalysisDates(stock.symbol)
   loadLatestAnalysis(stock.symbol)
   loadStockMetrics(stock.symbol, getCurrentDateString())
+}
+
+// Helper to process markdown and extract JSON plan
+const processAnalysisContent = (markdownText) => {
+    if (!markdownText) {
+        analysisResult.value = ''
+        tradingPlan.value = null
+        return
+    }
+
+    let planData = null
+    let cleanMarkdown = markdownText
+
+    // Strategy 1: Code Block (Best Case)
+    // Match ```json { ... } ```
+    const codeBlockRegex = /```(?:json)?\s*(\{(?:(?!```)[\s\S])*?"buy_trigger"[\s\S]*?\})\s*```/
+    let match = markdownText.match(codeBlockRegex)
+
+    if (match) {
+        try {
+            const jsonStr = match[1].replace(/\/\/.*$/gm, '') // Remove simple comments
+            planData = JSON.parse(jsonStr)
+            cleanMarkdown = markdownText.replace(match[0], '')
+        } catch (e) {
+            console.warn('Failed to parse JSON from Code Block:', e)
+        }
+    } 
+    
+    // Strategy 2: Raw/Prefixed JSON (e.g. "json { ... }")
+    if (!planData) {
+         // Find "buy_trigger" as an anchor
+         const triggerIdx = markdownText.indexOf('"buy_trigger"')
+         if (triggerIdx !== -1) {
+             // Find the opening brace '{' before "buy_trigger"
+             const openIdx = markdownText.lastIndexOf('{', triggerIdx)
+             if (openIdx !== -1) {
+                 // Manual bracket balancing to find the matching closing brace '}'
+                 let balance = 0
+                 let closeIdx = -1
+                 let inString = false
+                 let escape = false
+                 
+                 // Scan forward from openIdx
+                 for (let i = openIdx; i < markdownText.length; i++) {
+                     const char = markdownText[i]
+                     
+                     if (inString) {
+                         if (escape) {
+                             escape = false
+                         } else if (char === '\\') {
+                             escape = true
+                         } else if (char === '"') {
+                             inString = false
+                         }
+                     } else {
+                         if (char === '"') {
+                             inString = true
+                         } else if (char === '{') {
+                             balance++
+                         } else if (char === '}') {
+                             balance--
+                             if (balance === 0) {
+                                 closeIdx = i
+                                 break
+                             }
+                         }
+                     }
+                 }
+                 
+                 if (closeIdx !== -1) {
+                     const potentialJson = markdownText.slice(openIdx, closeIdx + 1)
+                     try {
+                         planData = JSON.parse(potentialJson)
+                         
+                         // Determine what to remove (include optional "json" prefix)
+                         let removalStart = openIdx
+                         // Check for "json" preceding the {
+                         // Look back up to 10 chars
+                         const lookBack = markdownText.slice(Math.max(0, openIdx - 10), openIdx)
+                         const prefixMatch = lookBack.match(/(?:^|\s)(json)\s*$/)
+                         if (prefixMatch) {
+                             // Adjust removalStart to include "json"
+                             removalStart = openIdx - prefixMatch[0].length + prefixMatch[0].indexOf('json') 
+                             // Adjust further if there's leading whitespace we want to eat? 
+                             // For now, let Markdown parser handle extra whitespace.
+                             // Actually, let's just look at index in original string
+                             removalStart = markdownText.lastIndexOf('json', openIdx)
+                         }
+
+                         const before = markdownText.slice(0, removalStart)
+                         const after = markdownText.slice(closeIdx + 1)
+                         cleanMarkdown = before + after
+                         
+                     } catch (e) {
+                         console.warn('Failed to parse raw JSON:', e)
+                     }
+                 }
+             }
+         }
+    }
+
+    tradingPlan.value = planData
+    analysisResult.value = marked.parse(cleanMarkdown)
 }
 
 const openEditModal = (stock) => {
@@ -590,14 +696,23 @@ const loadAnalysisHistory = async () => {
     analysisResult.value = ''
     try {
         const response = await apiMethods.getAnalysisHistory(selectedStockSymbol.value, selectedAnalysisDate.value, activeAnalyzerTab.value)
-         if (response.status === 'success' && response.data?.html) {
-          analysisResult.value = marked.parse(response.data.html)
+         if (response.status === 'success') {
+          // Prefer raw markdown 'ai_analysis' for processing, fallback to 'html' if missing
+          const rawContent = response.data?.ai_analysis || ''
+          if (rawContent) {
+              processAnalysisContent(rawContent)
+          } else if (response.data?.html) {
+              analysisResult.value = marked.parse(response.data.html)
+              tradingPlan.value = null
+          }
         } else {
           analysisResult.value = `<div class="p-4 text-center text-text-tertiary">暂无 ${selectedAnalysisDate.value} 的分析报告</div>`
+          tradingPlan.value = null
         }
     } catch (error) {
         console.error('History load failed:', error)
          analysisResult.value = `<div class="p-4 text-center text-danger">加载失败: ${error.message}</div>`
+         tradingPlan.value = null
     } finally {
         loadingAnalysis.value = false
     }
@@ -613,17 +728,27 @@ const loadLatestAnalysis = async (symbol) => {
   try {
     const response = await apiMethods.getLatestAnalysis(symbol, activeAnalyzerTab.value)
 
-    if (response.status === 'success' && response.data?.html) {
-      analysisResult.value = marked.parse(response.data.html)
+    if (response.status === 'success') {
+      // Prefer raw markdown
+      const rawContent = response.data?.ai_analysis || ''
+      if (rawContent) {
+          processAnalysisContent(rawContent)
+      } else if (response.data?.html) {
+          analysisResult.value = marked.parse(response.data.html)
+          tradingPlan.value = null
+      }
     } else if (response.status === 'no_data') {
       // No analysis available yet, keep empty
       analysisResult.value = ''
+      tradingPlan.value = null
     } else if (response.status === 'not_found') {
       analysisResult.value = ''
+      tradingPlan.value = null
     }
   } catch (error) {
     console.error('Failed to load latest analysis:', error)
     analysisResult.value = ''
+    tradingPlan.value = null
   } finally {
     loadingAnalysis.value = false
   }
@@ -692,6 +817,7 @@ const runAIAnalysis = async () => {
   analysisProgress.value = 'Initializing'
   // Don't clear result immediately if we want to show loading overlay, but usually better UX to clear or dim
   analysisResult.value = ''
+  tradingPlan.value = null
   let accumulatedMarkdown = ''
 
   try {
@@ -700,16 +826,26 @@ const runAIAnalysis = async () => {
           analysisProgress.value = data.message || data.content
         } else if (data.type === 'token') {
           accumulatedMarkdown += data.content
+          // Progressive rendering: try to parse markdown, but don't try to parse JSON yet (it might be incomplete)
           analysisResult.value = marked.parse(accumulatedMarkdown)
         }
     }
     const onComplete = (data) => {
         if (data.type === 'final_html') {
-          analysisResult.value = marked.parse(data.content)
+          // data.content is HTML. If we have been progressively updating via 'token', we already have raw markdown.
+          // Getting raw markdown from 'final_html' is impossible.
+          // However, streaming usually sends 'result' (Markdown) OR 'token'.
+          // Let's rely on accumulatedMarkdown if available, otherwise check data.type='result'.
         } else if (data.type === 'result') {
-          // Some endpoints return result
-           analysisResult.value = marked.parse(data.content)
+           // This provides the full markdown
+           processAnalysisContent(data.content)
         }
+        
+        // If we only got tokens and no 'result' event (some streams might behave differently)
+        if (accumulatedMarkdown && !analysisResult.value) {
+             processAnalysisContent(accumulatedMarkdown)
+        }
+        
         if (data.type === 'complete') {
           analyzing.value = false
           analysisProgress.value = 'Complete'

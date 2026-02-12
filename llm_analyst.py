@@ -16,6 +16,8 @@ except ImportError:
 
 
 import database
+from data_fetcher import fetch_intraday_data, fetch_cyq_data
+from indicator_calc import analyze_intraday_pattern, process_cyq_data
 from jinja2 import Template
 
 def get_prompt_from_db(slug: str, context: Dict[str, Any]) -> str:
@@ -39,9 +41,9 @@ def get_prompt_from_db(slug: str, context: Dict[str, Any]) -> str:
         print(f"❌ Error generating prompt for {slug}: {e}")
         return None
         
+
     except Exception as e:
         print(f"❌ Error generating prompt for {slug}: {e}")
-        # print(f"Template was: {strategy.get('template_content', '')[:100]}...")
         return None
 
 def create_risk_prompt(stock_info: Dict[str, Any], tech_data: Dict[str, Any]) -> str:
@@ -447,9 +449,16 @@ def create_realtime_etf_prompt(stock_info: Dict[str, Any], tech_data: Dict[str, 
 
 
 
-def create_deep_candidate_prompt(stock_info: Dict[str, Any], tech_data: Dict[str, Any], realtime_data: Dict[str, Any]) -> str:
+def create_deep_candidate_prompt(
+    stock_info: Dict[str, Any], 
+    tech_data: Dict[str, Any], 
+    realtime_data: Dict[str, Any],
+    market_context: Dict[str, Any] = None,
+    extra_indicators: Dict[str, Any] = None
+) -> str:
     """
     Create a DEEP MONITOR prompt for A-share stocks using 'deep_monitor' template.
+    Now uses EXPLICIT market_context argument.
     """
     # Ensure money_flow safety for template access
     if not realtime_data.get('money_flow'):
@@ -483,12 +492,22 @@ def create_deep_candidate_prompt(stock_info: Dict[str, Any], tech_data: Dict[str
         'sup': f"{sup:.2f}",
         'strength_str': strength_str
     }
+    
+    # 兼容旧代码：如果 market_context 为空，尝试构建默认值
+    if not market_context:
+        market_context = {
+            'market_index': {},
+            'sector_info': {},
+            'sentiment': {}
+        }
         
     db_prompt = get_prompt_from_db('deep_monitor', {
         'stock_info': stock_info,
         'tech_data': tech_data,
         'realtime_data': realtime_data,
-        'computed': computed
+        'market_context': market_context, # Explicit Context
+        'computed': computed,
+        'extra': extra_indicators or {}
     })
     
     if db_prompt:
@@ -532,10 +551,57 @@ def create_realtime_future_prompt(stock_info: Dict[str, Any], history_data: Dict
     return "DB Error: realtime_future prompt not found."
 
 
-def create_analysis_prompt(stock_info: Dict[str, Any], tech_data: Dict[str, Any], analysis_type: str = "holding", realtime_data: Dict[str, Any] = None, market_context: Dict[str, Any] = None) -> str:
+def create_analysis_prompt(
+    stock_info: Dict[str, Any], 
+    tech_data: Dict[str, Any], 
+    analysis_type: str = "holding", 
+    realtime_data: Dict[str, Any] = None, 
+    market_context: Dict[str, Any] = None,
+    extra_indicators: Dict[str, Any] = None
+) -> str:
     """
-    Dispatcher for prompt creation.
+    Dispatcher for prompt creation. 根据分析类型分发到具体的 Prompt 生成函数。
+
+    Args:
+        stock_info (Dict[str, Any]): 股票基础信息
+            - symbol (str): 股票代码 (如 '600519')
+            - name (str): 股票名称 (如 '贵州茅台')
+            - asset_type (str): 资产类型 ('stock', 'etf', 'crypto', 'future')
+        
+        tech_data (Dict[str, Any]): 技术面数据 (通常基于日线)
+            - close, open, high, low (float): 基础行情
+            - ma5, ma20, ma60 (float): 均线系统
+            - macd_dif, macd_dea, macd_signal (float): MACD指标
+            - rsi (float): RSI指标
+            - kdj_k, kdj_d (float): KDJ指标
+            - composite_score (float): 综合技术评分
+            - resistance, support (float): 压力位与支撑位
+            - score_details (list): 评分详情标签
+
+        analysis_type (str): 分析模式
+            - 'holding': 持仓日报分析 (默认)
+            - 'candidate': 选股/机会分析
+            - 'realtime': 实时盘中分析 (通用)
+            - 'intraday': 盘中盯盘分析 (主要用于 A股 Monitor)
+
+        realtime_data (Dict[str, Any], optional): 实时行情数据 (用于盘中分析)
+            - price (float): 当前现价
+            - change_pct (float): 当前涨跌幅
+            - volume_ratio (float): 量比
+            - vwap (float): 分时均价 (Intraday)
+            - weibi (float): 委比 (Intraday)
+            - money_flow (dict): 资金流向数据
+
+        market_context (Dict[str, Any], optional): 市场大环境上下文
+            - market_index (dict): 大盘指数信息 {'name', 'change_pct', 'trend'}
+            - sector_info (dict): 板块信息 {'name', 'change_pct'}
+            - sentiment (dict): 市场情绪 {'limit_up_count': int}
     """
+    print("create_analysis_prompt received stock_info", stock_info)
+    print("create_analysis_prompt received tech_data", tech_data)
+    print("create_analysis_prompt received realtime_data", realtime_data)
+    print("create_analysis_prompt received market_context", market_context)
+    print("create_analysis_prompt received extra_indicators", extra_indicators)
     # Use explicitly configured asset_type (from config), usually 'etf' or 'stock'
     # 'stock' is default if not specified
     # Also support 'type' field from raw config
@@ -554,11 +620,7 @@ def create_analysis_prompt(stock_info: Dict[str, Any], tech_data: Dict[str, Any]
             return create_realtime_etf_prompt(stock_info, tech_data, realtime_data)
         else:
             # A股专家分析
-            print("stock_info", stock_info)
-            print("tech_data", tech_data)
-            print("realtime_data", realtime_data)
-            print("market_context", market_context)
-            return create_deep_candidate_prompt(stock_info, tech_data, realtime_data)
+            return create_deep_candidate_prompt(stock_info, tech_data, realtime_data, market_context=market_context, extra_indicators=extra_indicators)
             
     elif analysis_type == "candidate":
         # Candidates are usually stocks, but could technically be ETFs
@@ -576,6 +638,132 @@ def create_analysis_prompt(stock_info: Dict[str, Any], tech_data: Dict[str, Any]
             return create_risk_prompt(stock_info, tech_data)
 
 
+
+
+
+def _fetch_extra_indicators(stock_info: Dict[str, Any], analysis_type: str, realtime_data: Dict[str, Any], tech_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Helper to fetch extra indicators (Advanced Technical Factors & Chips Distribution)
+    Updated to use Tushare Pro interfaces: stk_factor_pro & cyq_chips
+    """
+    extra_indicators = {}
+    if analysis_type == "realtime" and stock_info.get('asset_type', 'stock') == 'stock':
+        symbol = stock_info['symbol']
+        print(f"🔎 Fetching Advanced Factors & Chips for {symbol}...")
+        
+        # 1. Advanced Technical Factors (stk_factor_pro)
+        try:
+            from data_fetcher_ts import fetch_stk_factor_pro
+            
+            factors = fetch_stk_factor_pro(symbol)
+            if factors:
+                summary = []
+                # Select key factors
+                if 'asi_qfq' in factors: summary.append(f"ASI振动升降: {factors['asi_qfq']:.2f}")
+                if 'dmi_pdi_qfq' in factors and 'dmi_mdi_qfq' in factors: 
+                    summary.append(f"DMI动向: PDI={factors['dmi_pdi_qfq']:.2f}, MDI={factors['dmi_mdi_qfq']:.2f}")
+                if 'obv_qfq' in factors: summary.append(f"OBV能量潮: {factors['obv_qfq']:.2f}")
+                if 'mass_qfq' in factors: summary.append(f"梅斯线Mass: {factors['mass_qfq']:.2f}")
+                if 'cci_qfq' in factors: summary.append(f"CCI: {factors['cci_qfq']:.2f}")
+                if 'wr_qfq' in factors: summary.append(f"W&R: {factors['wr_qfq']:.2f}")
+                
+                factor_str = " | ".join(summary)
+                
+                # Provide structured data
+                extra_indicators['advanced_factors'] = {
+                     "desc": factor_str,
+                     "raw": factors
+                }
+                # Also provide a text summary for generic templates if they try to print extra
+                extra_indicators['technical_plus'] = factor_str
+                
+                # Fallback/Compat: Fill 'intraday' with factor info if template expects it
+                extra_indicators['intraday'] = {
+                    "strength_desc": f"技术面因子: {factor_str}" 
+                }
+                
+        except Exception as e:
+            print(f"⚠️ Factor analysis failed: {e}")
+            import traceback
+            traceback.print_exc()
+            
+        # 2. Chips Distribution (cyq_chips)
+        try:
+            from data_fetcher_ts import fetch_cyq_chips
+            
+            chips_df = fetch_cyq_chips(symbol)
+            if chips_df is not None and not chips_df.empty:
+                current_price = realtime_data.get('price') or tech_data.get('close')
+                
+                total_percent = chips_df['percent'].sum()
+                if total_percent > 0:
+                    # Avg Cost
+                    avg_cost = (chips_df['price'] * chips_df['percent']).sum() / total_percent
+                    
+                    # Winner Pct (Profit Ratio)
+                    winner_percent = chips_df[chips_df['price'] < current_price]['percent'].sum()
+                    
+                    # Concentration 90%
+                    chips_df = chips_df.sort_values('price')
+                    chips_df['cumsum_pct'] = chips_df['percent'].cumsum()
+                    
+                    try:
+                        p05 = chips_df[chips_df['cumsum_pct'] >= 5]['price'].iloc[0]
+                        p95 = chips_df[chips_df['cumsum_pct'] >= 95]['price'].iloc[0]
+                        concentration = (p95 - p05) / (p95 + p05) 
+                        conc_desc = f"{concentration:.2%}"
+                    except:
+                        p05, p95 = 0, 0
+                        concentration = 0
+                        conc_desc = "N/A"
+
+                    # Description
+                    cyq_desc = f"获利盘: {winner_percent:.2f}% | 平均成本: {avg_cost:.2f} | 90%成本区间: {p05:.2f}-{p95:.2f} (集中度 {conc_desc})"
+                    
+                    # Use 'vap' key for compatibility with existing prompt templates
+                    extra_indicators['vap'] = {
+                        "desc": cyq_desc,
+                        "winner_rate": winner_percent,
+                        "avg_cost": avg_cost,
+                        "concentration": concentration,
+                        "cost_range": f"{p05:.2f}-{p95:.2f}"
+                    }
+                    
+        except Exception as e:
+            print(f"⚠️ VAP analysis failed: {e}")
+            import traceback
+            traceback.print_exc()
+            
+    return extra_indicators
+
+def _get_system_instruction(analysis_type: str, stock_info: Dict[str, Any]) -> str:
+    """
+    Helper to determine the system instruction based on analysis type and asset type
+    """
+    asset_type = stock_info.get('asset_type', stock_info.get('type', 'stock'))
+    is_etf = (asset_type == 'etf')
+
+    system_instruction = "你是一名严格的风险控制官，首要任务是保护资本。"
+    
+    if analysis_type == "candidate":
+        system_instruction = "你是一名拥有20年实战经验的A股游资操盘手。你的风格是：犀利、客观、风险厌恶，只做大概率的确定性交易。"
+    elif analysis_type == "realtime":
+        if is_etf:
+            system_instruction = "你是一名稳健的资产配置专家，擅长ETF投资，注重长期趋势，过滤短期噪音。"
+        elif asset_type == 'crypto':
+            system_instruction = "你是一名资深的加密货币交易员，习惯高波动风险和7x24小时市场。"
+        elif asset_type == 'future':
+            system_instruction = "你是一名专业的期货交易员，极其重视杠杆风险管理。"
+        else:
+            system_instruction = "你是一名深谙A股主力资金运作模式的资深策略分析师。你擅长通过技术面、资金面和基本面的共振来寻找确定性机会。你的风格是：客观、犀利、重实战、不讲废话。"
+    elif is_etf: # Static holding analysis for ETF
+            system_instruction = "你是一名稳健的资产配置专家，擅长ETF投资。"
+    elif asset_type == 'crypto':
+            system_instruction = "你是一名资深的加密货币交易员，风格激进但重视止损。"
+    elif asset_type == 'future':
+            system_instruction = "你是一名专业的期货交易员，擅长日内和波段交易。"
+            
+    return system_instruction
 
 
 def generate_analysis_gemini(
@@ -608,37 +796,17 @@ def generate_analysis_gemini(
             location=location
         )
         
-        prompt = create_analysis_prompt(stock_info, tech_data, analysis_type, realtime_data, market_context)
+        
+        # [Refactored] Use shared helper for indicators
+        extra_indicators = _fetch_extra_indicators(stock_info, analysis_type, realtime_data, tech_data)
+
+        prompt = create_analysis_prompt(stock_info, tech_data, analysis_type, realtime_data, market_context, extra_indicators=extra_indicators)
         
         # Log the full prompt
         print(f"\n======== [Gemini Prompt Debug ({analysis_type})] ========\n{prompt}\n=========================================================\n")
 
-        # Dynamic System Instruction based on asset type
-        asset_type = stock_info.get('asset_type', stock_info.get('type', 'stock'))
-        is_etf = (asset_type == 'etf')
-
-        system_instruction = "你是一名严格的风险控制官，首要任务是保护资本。"
-        if analysis_type == "candidate":
-            # Check if we are in Speculator mode (implicitly via prompt content or config)
-            # But here we set system instruction.
-            # Let's set a punchy persona for candidate analysis.
-            system_instruction = "你是一名拥有20年实战经验的A股游资操盘手。你的风格是：犀利、客观、风险厌恶，只做大概率的确定性交易。"
-        elif analysis_type == "realtime":
-            if is_etf:
-                system_instruction = "你是一名稳健的资产配置专家，擅长ETF投资，注重长期趋势，过滤短期噪音。"
-            elif asset_type == 'crypto':
-                system_instruction = "你是一名资深的加密货币交易员，习惯高波动风险和7x24小时市场。"
-            elif asset_type == 'future':
-                system_instruction = "你是一名专业的期货交易员，极其重视杠杆风险管理。"
-            else:
-                # Upgraded System Instruction for Stocks
-                system_instruction = "你是一名深谙A股主力资金运作模式的资深策略分析师。你擅长通过技术面、资金面和基本面的共振来寻找确定性机会。你的风格是：客观、犀利、重实战、不讲废话。"
-        elif is_etf: # Static holding analysis for ETF
-             system_instruction = "你是一名稳健的资产配置专家，擅长ETF投资。"
-        elif asset_type == 'crypto':
-             system_instruction = "你是一名资深的加密货币交易员，风格激进但重视止损。"
-        elif asset_type == 'future':
-             system_instruction = "你是一名专业的期货交易员，擅长日内和波段交易。"
+        # [Refactored] Use shared helper for system instruction
+        system_instruction = _get_system_instruction(analysis_type, stock_info)
 
         response = client.models.generate_content(
             model=model,
@@ -689,34 +857,17 @@ def generate_analysis_openai(
             base_url=base_url
         )
         
-        prompt = create_analysis_prompt(stock_info, tech_data, analysis_type, realtime_data, market_context=market_context)
+        
+        # [Refactored] Use shared helper for indicators
+        extra_indicators = _fetch_extra_indicators(stock_info, analysis_type, realtime_data, tech_data)
+
+        prompt = create_analysis_prompt(stock_info, tech_data, analysis_type, realtime_data, market_context=market_context, extra_indicators=extra_indicators)
         
         # Log the full prompt
         print(f"\n======== [OpenAI Prompt Debug ({analysis_type})] ========\n{prompt}\n=========================================================\n")
 
-        # Dynamic System Instruction based on asset type
-        asset_type = stock_info.get('asset_type', stock_info.get('type', 'stock'))
-        is_etf = (asset_type == 'etf')
-
-        system_content = "你是一名严格的风险控制官。你的首要任务是保护资本。"
-        if analysis_type == "candidate":
-            system_content = "你是一名拥有20年实战经验的A股游资操盘手。你的风格是：犀利、客观、风险厌恶，只做大概率的确定性交易。"
-        elif analysis_type == "realtime":
-            if is_etf:
-                system_content = "你是一名稳健的资产配置专家，擅长ETF投资，注重长期趋势，过滤短期噪音。"
-            elif asset_type == 'crypto':
-                system_content = "你是一名资深的加密货币交易员，习惯高波动风险。"
-            elif asset_type == 'future':
-                system_content = "你是一名专业的期货交易员，极其重视杠杆风险。"
-            else:
-                # Upgraded System Instruction for Stocks
-                system_content = "你是一名深谙A股主力资金运作模式的资深策略分析师。你擅长通过技术面、资金面和基本面的共振来寻找确定性机会。你的风格是：客观、犀利、重实战、不讲废话。"
-        elif is_etf: # Static holding analysis for ETF
-             system_content = "你是一名稳健的资产配置专家，擅长ETF投资。"
-        elif asset_type == 'crypto':
-             system_content = "你是一名资深的加密货币交易员。"
-        elif asset_type == 'future':
-             system_content = "你是一名专业的期货交易员。"
+        # [Refactored] Use shared helper for system instruction
+        system_content = _get_system_instruction(analysis_type, stock_info)
 
         # Prepare API call parameters
         api_params = {

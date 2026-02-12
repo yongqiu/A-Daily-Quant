@@ -529,3 +529,91 @@ def _format_symbol(symbol: str) -> str:
          return f"{symbol}.SH"
          
     return symbol
+
+
+def fetch_stk_factor_pro(symbol: str, date: str = None) -> Optional[Dict[str, Any]]:
+    """
+    Fetch professional technical factors (stk_factor_pro) from Tushare.
+    Includes: ASI, ATR, BBI, DMI, KTN, MASS, OBV, RSI, etc.
+    """
+    pro = get_pro_client()
+    if pro is None:
+        return None
+        
+    try:
+        ts_symbol = _format_symbol(symbol)
+        
+        # If date is not provided, try to fetch a range of recent days to find the latest
+        end_date = date
+        start_date = date
+        
+        if not date:
+            end_date = datetime.now().strftime('%Y%m%d')
+            start_date = (datetime.now() - timedelta(days=10)).strftime('%Y%m%d')
+
+        # Limit to 10 days to be safe
+        df = pro.stk_factor_pro(
+            ts_code=ts_symbol, 
+            start_date=start_date, 
+            end_date=end_date
+        )
+        
+        if df is None or df.empty:
+            return None
+            
+        # Get the latest record based on trade_date
+        df = df.sort_values('trade_date', ascending=False)
+        # Convert first row (Series) to dict
+        row_dict = df.iloc[0].to_dict()
+        
+        return row_dict
+        
+    except Exception as e:
+        print(f"❌ Error fetching stk_factor_pro for {symbol}: {e}")
+        return None
+
+
+def fetch_cyq_chips(symbol: str, date: str = None) -> Optional[pd.DataFrame]:
+    """
+    Fetch CYQ (Chips Distribution) data from Tushare.
+    Returns a DataFrame with columns: price, percent.
+    """
+    pro = get_pro_client()
+    if pro is None:
+        return None
+        
+    try:
+        ts_symbol = _format_symbol(symbol)
+        
+        end_date = date
+        start_date = date
+        
+        if not date:
+            end_date = datetime.now().strftime('%Y%m%d')
+            # Look back 5 days max
+            start_date = (datetime.now() - timedelta(days=5)).strftime('%Y%m%d')
+
+        # Fetch data
+        df = pro.cyq_chips(ts_code=ts_symbol, start_date=start_date, end_date=end_date)
+        
+        if df is None or df.empty:
+            return None
+            
+        # Find the latest date in the result
+        latest_date = df['trade_date'].max()
+        
+        # Filter for only the latest date
+        latest_df = df[df['trade_date'] == latest_date].copy()
+        
+        # Ensure columns are numeric
+        latest_df['price'] = pd.to_numeric(latest_df['price'], errors='coerce')
+        latest_df['percent'] = pd.to_numeric(latest_df['percent'], errors='coerce')
+        
+        # Sort by price ascending
+        latest_df = latest_df.sort_values('price')
+        
+        return latest_df
+        
+    except Exception as e:
+        print(f"❌ Error fetching cyq_chips for {symbol}: {e}")
+        return None

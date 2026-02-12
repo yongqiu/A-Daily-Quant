@@ -779,3 +779,110 @@ def get_latest_metrics(df: pd.DataFrame, cost_price: float = None) -> Dict[str, 
     metrics['operation_suggestion'] = get_stock_operation_suggestion(total_score, metrics)
     
     return metrics
+
+
+def analyze_intraday_pattern(df: pd.DataFrame, pre_close: float) -> Dict[str, str]:
+    """
+    分析分时图特征 (Intraday Behavior)
+    
+    Args:
+        df: 分时数据 (date, open, close, high, low, volume)
+        pre_close: 昨日收盘价
+        
+    Returns:
+        Dict with semantic descriptions
+    """
+    if df is None or df.empty or pre_close == 0:
+        return {
+            "open_desc": "未知",
+            "close_desc": "未知",
+            "strength_desc": "未知"
+        }
+        
+    # 1. 开盘形态 (前30分钟)
+    # 取前30条数据 (假设1分钟1条)
+    opening_30 = df.head(30)
+    open_price = df.iloc[0]['open']
+    
+    open_pct = (open_price - pre_close) / pre_close * 100
+    
+    open_desc = "平开"
+    if open_pct > 2.0: open_desc = f"高开({open_pct:.1f}%)"
+    elif open_pct < -2.0: open_desc = f"低开({open_pct:.1f}%)"
+    elif open_pct > 0.5: open_desc = "小幅高开"
+    elif open_pct < -0.5: open_desc = "小幅低开"
+    
+    # Check if "Low Open High Go" (低开高走)
+    # Start < 0, End of 30min > Start
+    if open_pct < -0.5 and opening_30.iloc[-1]['close'] > open_price:
+        open_desc += "且低开高走"
+        
+    # 2. 封板强度 (Limit Strength)
+    last_price = df.iloc[-1]['close']
+    limit_up_price = round(pre_close * 1.10, 2) # 简单估算10%
+    is_limit_up = (last_price >= limit_up_price - 0.02) # allowing minimal float error
+    
+    strength_desc = "常态震荡"
+    if is_limit_up:
+        strength_desc = "强势封板"
+        # Check if broken (did it open limit up?)
+        # 简单检查: 最低价是否大幅低于涨停价
+        if df['low'].min() < limit_up_price * 0.98:
+            strength_desc = "烂板(曾打开)"
+            
+    # 3. 尾盘表现 (Last 30 mins)
+    closing_30 = df.tail(30)
+    if len(closing_30) > 10:
+        start_close = closing_30.iloc[0]['close']
+        end_close = closing_30.iloc[-1]['close']
+        
+        last_change = (end_close - start_close) / start_close * 100
+        
+        close_desc = "平稳"
+        if last_change > 1.0: close_desc = "尾盘抢筹拉升"
+        elif last_change < -1.0: close_desc = "尾盘跳水"
+    else:
+        close_desc = "数据不足"
+        
+    return {
+        "open_desc": open_desc,
+        "close_desc": close_desc,
+        "strength_desc": strength_desc
+    }
+
+
+def process_cyq_data(cyq_row: Dict[str, float], current_price: float) -> Dict[str, Any]:
+    """
+    处理筹码分布数据，生成语义化描述
+    """
+    if not cyq_row:
+        return {}
+        
+    profit_pct = cyq_row.get('profit_pct', 0) * 100 # Convert to %
+    avg_cost = cyq_row.get('avg_cost', 0)
+    concentration = cyq_row.get('concentration_90', 0) * 100
+    
+    # Semantic analysis
+    # Cost Position
+    cost_pos = "未知"
+    if current_price > avg_cost * 1.05:
+        cost_pos = "股价位于平均成本上方 (获利盘主导)"
+    elif current_price < avg_cost * 0.95:
+        cost_pos = "股价位于平均成本下方 (套牢盘主导)"
+    else:
+        cost_pos = "股价在平均成本附近震荡"
+        
+    # Concentration
+    conc_desc = "筹码发散"
+    if concentration < 10:
+        conc_desc = "筹码高度密集 (主力控盘)"
+    elif concentration < 20:
+        conc_desc = "筹码相对集中"
+        
+    return {
+        "profit_pct": f"{profit_pct:.1f}%",
+        "avg_cost": f"{avg_cost:.2f}",
+        "concentration": f"{concentration:.1f}%",
+        "semantic_pos": cost_pos,
+        "semantic_conc": conc_desc
+    }

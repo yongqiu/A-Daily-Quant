@@ -744,6 +744,78 @@ def fetch_stock_info(symbol: str) -> Optional[Dict[str, Any]]:
             print(f"⚠️ Fast fetch failed for {symbol}: {e}")
             return None
 
+
     except Exception as e:
         print(f"❌ Error fetching stock info for {symbol}: {e}")
+        return None
+
+
+def fetch_intraday_data(symbol: str) -> Optional[pd.DataFrame]:
+    """
+    获取今日分时数据 (1分钟级)
+    返回: date, open, high, low, close, volume DataFrame
+    """
+    try:
+        # AkShare 分时接口需要特定前缀
+        if symbol.startswith('6'):
+            code = f"sh{symbol}"
+        elif symbol.startswith('0') or symbol.startswith('3'):
+            code = f"sz{symbol}"
+        else:
+            return None
+            
+        # period='1' 代表1分钟
+        df = ak.stock_zh_a_minute(symbol=code, period='1', adjust='qfq')
+        print("df",df)
+        
+        if df is None or df.empty:
+            return None
+            
+        # 确保列名标准化
+        # akshare返回: day, open, high, low, close, volume
+        df = df.rename(columns={'day': 'date'})
+        df['date'] = pd.to_datetime(df['date'])
+        
+        # 转换数值类型
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+            
+        return df
+        
+    except Exception as e:
+        print(f"⚠️ Error fetching intraday data for {symbol}: {e}")
+        return None
+
+
+def fetch_cyq_data(symbol: str) -> Optional[Dict[str, float]]:
+    """
+    获取最新筹码分布数据 (CYQ - Cost Distribution)
+    返回: 包含获利比例、平均成本、集中度等的字典
+    """
+    try:
+        # 获取最新可用的筹码数据
+        df = ak.stock_cyq_em(symbol=symbol, adjust="qfq")
+        
+        if df is None or df.empty:
+            return None
+            
+        # 取最新的一行
+        latest = df.iloc[-1]
+        
+        return {
+            "date": str(latest['日期']),
+            "profit_pct": float(latest.get('获利比例', 0)),
+            "avg_cost": float(latest.get('平均成本', 0)),
+            # 集中度通常是 (高-低)/(高+低) 或者直接由API提供
+            # AkShare 返回: 90集中度, 70集中度
+            "concentration_90": float(latest.get('90集中度', 0)),
+            "concentration_70": float(latest.get('70集中度', 0)),
+            "cost_90_low": float(latest.get('90成本-低', 0)),
+            "cost_90_high": float(latest.get('90成本-高', 0)),
+            "cost_70_low": float(latest.get('70成本-低', 0)),
+            "cost_70_high": float(latest.get('70成本-高', 0))
+        }
+        
+    except Exception as e:
+        print(f"⚠️ Error fetching CYQ data for {symbol}: {e}")
         return None
