@@ -97,7 +97,7 @@ source .venv/bin/activate  # macOS/Linux
 # 安装依赖
 pip install -r requirements.txt
 
-# 确保已进入虚拟环境
+# 确保已进入虚拟环境，一键启动
 python start.py
 ```
 
