@@ -96,6 +96,9 @@ source .venv/bin/activate  # macOS/Linux
 
 # 安装依赖
 pip install -r requirements.txt
+
+# 确保已进入虚拟环境
+python start.py
 ```
 
 ### 2. 配置说明
@@ -110,20 +113,17 @@ cp config.json.example config.json
     "provider": "tushare",
     "tushare_token": "your-tushare-token"
   },
-  "database": {
-    "type": "mysql",
-    "host": "localhost",
-    "port": 3306,
-    "user": "root",
-    "password": "",
-    "db": "db_daily_strategy"
-#### 2. 一键启动向导 (推荐)
+  "api": {
+    "provider": "deepseek"
+  },
+  "api_deepseek": {
+    "provider": "deepseek",
+    "api_key": "your-token",
+    "base_url": "https://api.deepseek.com/v1",
+    "model": "deepseek-chat"
+  }
+}
 
-本项目内置了初始化向导，确保在项目根目录执行：
-
-```bash
-# 确保已进入虚拟环境
-python start.py
 ```
 
 `start.py` 会自动完成：环境检查、依赖安装、**交互式生成配置文件**、初始化数据库、并最终拉起 Web 看板。
