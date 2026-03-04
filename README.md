@@ -21,11 +21,13 @@
 
 ## 核心特性
 
-*   **AI 智脑 (Agent Analyst)**: 集成 OpenAI/Gemini/DeepSeek 等大模型，对持仓和标的进行深度复盘与预测。
-*   **量化筛选 (Quant Screener)**: 基于“趋势跟踪 + 资金共振”逻辑，每日自动扫描全市场，捕捉强势股。
+*   **多专家 AI 辩论 (Multi-Agent Debate)**: 内置"趋势跟随者 / 异动猎手 / 基本面研究员 / 首席投资官"四大专家角色，通过辩论博弈产出高质量分析报告。
+*   **统一上下文工厂 (Strategy Data Factory)**: 一次性准备所有上下文数据（技术面、基本面、筹码分布、资金流向），确保 Prompt 数据完整性。
+*   **量化筛选 (Quant Screener)**: 基于"趋势跟踪 + 资金共振"逻辑，每日自动扫描全市场，捕捉强势股。
 *   **动态风控 (Risk Shield)**: 独创 Beta Shield 风控模型，根据大盘环境动态调整仓位建议，在大跌前强制空仓。
 *   **实时雷达 (Real-time Monitor)**: Web 可视化看板，实时监控自选股的量比、资金流向与盘口异常。
 *   **自动化研报 (Auto Report)**: 每日盘后自动生成精美的 HTML/Markdown 研报，复盘当日操作与明日计划。
+*   **零配置启动**: 内置 SQLite 数据库，开箱即用无需任何外部依赖，同时兼容 MySQL 等外置数据库。
 
 ##  运行截图
 
@@ -35,30 +37,51 @@
 
 ```mermaid
 graph TD
-    Data[数据层<br>AkShare/Tushare/Efinance] --> Engine[核心引擎<br>Monitor Engine]
-    Engine --> |清洗 & 计算| Calculator[指标计算<br>Indicator Calc]
-    Calculator --> |量化因子| Screener[选股器<br>Stock Screener]
-    Calculator --> |技术状态| AI[AI 分析师<br>LLM Analyst]
+    Data[数据层<br>Tushare / 腾讯行情] --> Factory[数据工厂<br>StrategyDataFactory]
+    Factory --> |技术指标| Calculator[指标计算<br>Indicator Calc]
+    Factory --> |基本面/筹码| Extra[高阶因子<br>Tushare Pro]
+    Factory --> |实时行情| RT[实时数据<br>Monitor Engine]
     
-    Screener --> |候选标的| DB[(数据库<br>SQLite/MySQL)]
-    AI --> |分析报告| DB
+    Calculator --> Context[上下文构建器<br>Context Builder]
+    Extra --> Context
+    RT --> Context
+    
+    Context --> |ctx 对象| SingleAI[单专家分析<br>Single Expert]
+    Context --> |ctx 对象| MultiAI[多专家辩论<br>Multi-Agent]
+    
+    MultiAI --> |趋势派| AgentA[Agent A: 趋势跟随]
+    MultiAI --> |异动派| AgentB[Agent B: 异动猎手]
+    MultiAI --> |基本面| AgentC[Agent C: 基本面]
+    AgentA --> CIO[Agent CIO: 首席投资官]
+    AgentB --> CIO
+    AgentC --> CIO
+    
+    SingleAI --> DB[(数据库<br>SQLite/MySQL)]
+    CIO --> DB
     
     DB --> Web[Web 看板<br>FastAPI + Vue3]
-    DB --> Report[每日研报<br>HTML Generator]
+    DB --> Report[每日研报<br>Markdown]
 ```
 
-## 🚀 快速开始
+## 🚀 快速开始 (开箱即用)
 
-### 1. 环境准备
+本项目已实现**零配置/零中间件**的极简启动，彻底移除了对 MySQL/Redis 的强制依赖。
 
-确保系统已安装 Python 3.9+。
+### 1. 克隆代码
 
 ```bash
-# 克隆项目
-git clone https://github.com/yourusername/a-daily-quant.git
-cd a-daily-quant
+git clone https://github.com/yongqiu/A-Daily-Quant.git
+cd A-Daily-Quant
+```
 
-# 创建虚拟环境
+### 2. 一键启动向导
+
+为了避免与其他项目的依赖冲突，**强烈建议**在虚拟环境中运行。
+
+确保系统已安装 **Python 3.9+**，在项目根目录依次执行：
+
+```bash
+# 创建虚拟环境 (选做但推荐)
 python -m venv .venv
 source .venv/bin/activate  # macOS/Linux
 # .venv\Scripts\activate   # Windows
@@ -100,32 +123,41 @@ cp config.json.example config.json
 }
 ```
 
-### 3. 运行系统
+`start.py` 脚本会自动完成以下所有工作：
+1. 检查 Python 版本。
+2. 自动检查并为您安装所需的依赖库 (`requirements.txt`)。
+3. 交互式引导填入 API Key（如果您是第一次运行）。
+4. 静默创建高能本地数据库 (`SQLite`) 并灌入预设策略。
+5. 一键拉起 Web 看板服务并在浏览器中为您打开。
 
-#### 🖥️ 启动 Web 监控台 (推荐)
+> **进阶提示**: 您也可以随后修改根目录生成的 `config.json` 来调整大模型通道，或在里面显式配置 MySQL 等外置数据库（对高阶用户完全兼容）。
 
-```bash
-./start_web.sh
-```
-访问: `http://127.0.0.1:8100`
+#### 🤖 生成每日策略研报 (CLI模式)
 
-#### 🤖 生成每日策略研报
+当您在看板调参完毕后，可以一键生成静态报告：
 
 ```bash
 python main.py --section all
 ```
 研报将生成在 `reports/` 目录下。
 
+
 ## 📂 项目结构
 
 | 目录/文件 | 说明 |
 | :--- | :--- |
+| `start.py` | 一键启动向导（环境检查、依赖安装、数据库初始化） |
+| `strategy_data_factory.py` | **统一数据工厂**（多级缓存，一次性准备所有分析上下文） |
+| `context_builder.py` | 上下文构建器（将散落数据清洗封装为 Prompt 友好的 ctx 对象） |
+| `llm_analyst.py` | AI 深度分析模块（支持 OpenAI/Gemini/DeepSeek，Jinja2 模板驱动） |
+| `agent_analyst.py` | 多专家辩论系统（Multi-Agent Debate 调度器） |
 | `monitor_engine.py` | 核心监控与调度引擎 |
 | `stock_screener.py` | 每日选股策略实现 |
-| `llm_analyst.py` | AI 深度分析模块 (LLM) |
-| `web_server.py` | Web 后端 (FastAPI) |
-| `frontend/` | Web 前端源码 (Vue3) |
-| `strategies/` | 具体的量化策略逻辑 |
+| `web_server.py` | Web 后端 (FastAPI，SSE 流式推送) |
+| `database.py` | 数据库抽象层（SQLite / MySQL 自动适配） |
+| `data_fetcher.py` | 数据获取调度器 |
+| `data_fetcher_ts.py` | Tushare Pro 数据源（高阶因子、筹码分布、财务指标） |
+| `frontend/` | Web 前端源码 (Vue3 + Vite) |
 | `reports/` | 自动生成的研报存档 |
 
 ## ⚠️ 免责声明

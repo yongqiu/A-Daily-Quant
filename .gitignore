@@ -52,3 +52,7 @@ debug_*.py
 verify_*.py
 config.json
 scripts
+
+*.db
+llm_analyst_refactored.py
+llm_analyst_refactored_v2.py

@@ -314,8 +314,12 @@ def run_rough_screen(df: pd.DataFrame, criteria: Dict[str, Any]) -> List[Dict[st
     # 排除北交所（代码以 8 或 4 开头）
     # 如果配置了，过滤创业板 (30)
     allowed_prefixes = ['00', '60']
-    if not criteria.get('exclude_startup_board', False):
+    if not criteria.get('exclude_startup_board', True):
         allowed_prefixes.append('30')
+        
+    # 如果配置了，过滤科创板 (68)
+    if not criteria.get('exclude_star_market', True): # 默认为True，即默认过滤科创板
+        allowed_prefixes.append('68')
         
     pattern = r'^(' + '|'.join(allowed_prefixes) + ')'
     mask &= (df['symbol'].astype(str).str.match(pattern))

@@ -94,7 +94,22 @@
                     </div>
 
                     <div class="flex justify-between items-center mb-1">
-                      <span class="text-sm text-text-secondary truncate max-w-[120px]">{{ stock.name }}</span>
+                      <div class="flex items-center gap-1.5">
+                        <!-- 收藏按鈕（五角星） -->
+                        <button
+                          @click.stop="toggleStar(stock)"
+                          :disabled="starringSymbol === stock.symbol"
+                          class="p-0.5 rounded transition-all duration-200 flex-shrink-0"
+                          :class="stock.is_starred
+                            ? 'text-yellow-400 hover:text-yellow-300'
+                            : 'text-text-tertiary/40 hover:text-yellow-400'"
+                          :title="stock.is_starred ? '取消收藏' : '添加收藏'"
+                        >
+                          <StarIconSolid v-if="stock.is_starred" class="w-3.5 h-3.5" />
+                          <StarIcon v-else class="w-3.5 h-3.5" />
+                        </button>
+                        <span class="text-sm text-text-secondary truncate max-w-[110px]">{{ stock.name }}</span>
+                      </div>
                       <span class="text-sm font-mono font-bold" :class="stock.change_pct >= 0 ? 'text-up' : 'text-down'">
                         {{ stock.change_pct >= 0 ? '+' : '' }}{{ stock.change_pct?.toFixed(2) }}%
                       </span>
@@ -167,7 +182,20 @@
                          </div>
                          
                          <!-- Name -->
-                         <div class="w-32 flex items-center pr-2">
+                         <div class="w-32 flex items-center gap-1 pr-2">
+                             <!-- 收藏按鈕（五角星） -->
+                             <button
+                               @click.stop="toggleStar(stock)"
+                               :disabled="starringSymbol === stock.symbol"
+                               class="p-1 rounded transition-all duration-200 flex-shrink-0"
+                               :class="stock.is_starred
+                                 ? 'text-yellow-400 hover:text-yellow-300'
+                                 : 'text-text-tertiary/30 hover:text-yellow-400'"
+                               :title="stock.is_starred ? '取消收藏' : '添加收藏'"
+                             >
+                               <StarIconSolid v-if="stock.is_starred" class="w-3.5 h-3.5" />
+                               <StarIcon v-else class="w-3.5 h-3.5" />
+                             </button>
                              <span class="text-text-primary font-medium truncate text-base hover:text-primary cursor-pointer" title="点击查看详情">{{ stock.name }}</span>
                          </div>
                          
@@ -458,7 +486,9 @@ import {
   XMarkIcon,
   BeakerIcon,
   BoltIcon,
+  StarIcon,
 } from '@heroicons/vue/24/outline'
+import { StarIcon as StarIconSolid } from '@heroicons/vue/24/solid'
 
 const marketStore = useMarketStore()
 
@@ -480,6 +510,7 @@ const loadingAnalysis = ref(false)
 const activeAnalyzerTab = ref('single_expert') // 'multi_agent' or 'single_expert'
 const availableAnalysisDates = ref([])
 const selectedAnalysisDate = ref(null)
+const starringSymbol = ref(null) // 正在切换收藏状态的股票代码
 
 // Computed
 const selectedStock = computed(() => {
@@ -533,99 +564,8 @@ const processAnalysisContent = (markdownText) => {
         return
     }
 
-    let planData = null
-    let cleanMarkdown = markdownText
-
-    // Strategy 1: Code Block (Best Case)
-    // Match ```json { ... } ```
-    const codeBlockRegex = /```(?:json)?\s*(\{(?:(?!```)[\s\S])*?"buy_trigger"[\s\S]*?\})\s*```/
-    let match = markdownText.match(codeBlockRegex)
-
-    if (match) {
-        try {
-            const jsonStr = match[1].replace(/\/\/.*$/gm, '') // Remove simple comments
-            planData = JSON.parse(jsonStr)
-            cleanMarkdown = markdownText.replace(match[0], '')
-        } catch (e) {
-            console.warn('Failed to parse JSON from Code Block:', e)
-        }
-    } 
-    
-    // Strategy 2: Raw/Prefixed JSON (e.g. "json { ... }")
-    if (!planData) {
-         // Find "buy_trigger" as an anchor
-         const triggerIdx = markdownText.indexOf('"buy_trigger"')
-         if (triggerIdx !== -1) {
-             // Find the opening brace '{' before "buy_trigger"
-             const openIdx = markdownText.lastIndexOf('{', triggerIdx)
-             if (openIdx !== -1) {
-                 // Manual bracket balancing to find the matching closing brace '}'
-                 let balance = 0
-                 let closeIdx = -1
-                 let inString = false
-                 let escape = false
-                 
-                 // Scan forward from openIdx
-                 for (let i = openIdx; i < markdownText.length; i++) {
-                     const char = markdownText[i]
-                     
-                     if (inString) {
-                         if (escape) {
-                             escape = false
-                         } else if (char === '\\') {
-                             escape = true
-                         } else if (char === '"') {
-                             inString = false
-                         }
-                     } else {
-                         if (char === '"') {
-                             inString = true
-                         } else if (char === '{') {
-                             balance++
-                         } else if (char === '}') {
-                             balance--
-                             if (balance === 0) {
-                                 closeIdx = i
-                                 break
-                             }
-                         }
-                     }
-                 }
-                 
-                 if (closeIdx !== -1) {
-                     const potentialJson = markdownText.slice(openIdx, closeIdx + 1)
-                     try {
-                         planData = JSON.parse(potentialJson)
-                         
-                         // Determine what to remove (include optional "json" prefix)
-                         let removalStart = openIdx
-                         // Check for "json" preceding the {
-                         // Look back up to 10 chars
-                         const lookBack = markdownText.slice(Math.max(0, openIdx - 10), openIdx)
-                         const prefixMatch = lookBack.match(/(?:^|\s)(json)\s*$/)
-                         if (prefixMatch) {
-                             // Adjust removalStart to include "json"
-                             removalStart = openIdx - prefixMatch[0].length + prefixMatch[0].indexOf('json') 
-                             // Adjust further if there's leading whitespace we want to eat? 
-                             // For now, let Markdown parser handle extra whitespace.
-                             // Actually, let's just look at index in original string
-                             removalStart = markdownText.lastIndexOf('json', openIdx)
-                         }
-
-                         const before = markdownText.slice(0, removalStart)
-                         const after = markdownText.slice(closeIdx + 1)
-                         cleanMarkdown = before + after
-                         
-                     } catch (e) {
-                         console.warn('Failed to parse raw JSON:', e)
-                     }
-                 }
-             }
-         }
-    }
-
-    tradingPlan.value = planData
-    analysisResult.value = marked.parse(cleanMarkdown)
+    tradingPlan.value = null
+    analysisResult.value = marked.parse(markdownText)
 }
 
 const openEditModal = (stock) => {
@@ -638,7 +578,7 @@ const confirmRemove = async (stock) => {
         try {
             await apiMethods.deleteHolding(stock.symbol)
             await marketStore.fetchStatus()
-            // If removed stock was selected, select first available or null
+            // 如果移除的股票正在被选中，则选择第一个可用或 null
             if (selectedStockSymbol.value === stock.symbol) {
                 selectedStockSymbol.value = null
                 analysisResult.value = ''
@@ -646,6 +586,23 @@ const confirmRemove = async (stock) => {
         } catch (e) {
             alert('移除失败: ' + e.message)
         }
+    }
+}
+
+// 切换收藏状态
+const toggleStar = async (stock) => {
+    if (starringSymbol.value === stock.symbol) return  // 防止重复点击
+    starringSymbol.value = stock.symbol
+    try {
+        const res = await apiMethods.toggleStarHolding(stock.symbol)
+        if (res.status === 'success') {
+            // 直接更新本地 store，无需重新获取全量数据
+            stock.is_starred = res.is_starred
+        }
+    } catch (e) {
+        console.error('收藏操作失败:', e)
+    } finally {
+        starringSymbol.value = null
     }
 }
 

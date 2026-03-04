@@ -47,6 +47,9 @@ export const apiMethods = {
 
   deleteHolding: (symbol) => api.delete(`/holdings/${symbol}`),
 
+  // 切换收藏状态（五角星）
+  toggleStarHolding: (symbol) => api.patch(`/holdings/${symbol}/star`),
+
   searchStock: (symbol) => api.get(`/stock/search/${symbol}`),
 
   // K线数据
@@ -165,6 +168,8 @@ export const apiMethods = {
 
   updateStrategyParam: (id, key, value) =>
     api.post(`/strategies/${id}/params`, { key, value }),
+
+  getStrategyContextSchema: () => api.get('/strategy/context-schema'),
 
   // 选股相关
   getDailySelections: (date = null) => {

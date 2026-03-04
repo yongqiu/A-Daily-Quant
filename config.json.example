@@ -43,5 +43,21 @@
     "lookback_days": 365,
     "ma_short": 20,
     "ma_long": 60
+  },
+  "selection_rules": {
+    "enabled": true,
+    "min_change": 2.0,
+    "max_change": 8.0,
+    "min_volume_ratio": 1.5,
+    "min_turnover": 3.0,
+    "max_turnover": 15.0,
+    "min_mcap_b": 30,
+    "max_mcap_b": 1000,
+    "exclude_loss_making": true,
+    "exclude_startup_board": true,
+    "exclude_star_market": true,
+    "max_candidates_rough": 100,
+    "min_score": 70,
+    "max_final_candidates": 5
   }
 }

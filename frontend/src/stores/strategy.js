@@ -6,6 +6,7 @@ export const useStrategyStore = defineStore('strategy', () => {
   // 状态
   const strategies = ref([])
   const selectedStrategy = ref(null)
+  const contextSchema = ref([])
   const loading = ref(false)
 
   // 方法
@@ -34,6 +35,17 @@ export const useStrategyStore = defineStore('strategy', () => {
       throw error
     } finally {
       loading.value = false
+    }
+  }
+
+  const fetchContextSchema = async () => {
+    try {
+      const data = await apiMethods.getStrategyContextSchema()
+      contextSchema.value = data.schema || []
+      return data.schema
+    } catch (error) {
+      console.error('获取可用变量字典失败:', error)
+      return []
     }
   }
 
@@ -70,9 +82,11 @@ export const useStrategyStore = defineStore('strategy', () => {
   return {
     strategies,
     selectedStrategy,
+    contextSchema,
     loading,
     fetchStrategies,
     fetchStrategy,
+    fetchContextSchema,
     selectStrategy,
     updateTemplate,
     updateParam

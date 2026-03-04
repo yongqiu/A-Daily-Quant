@@ -787,6 +787,231 @@ def fetch_intraday_data(symbol: str) -> Optional[pd.DataFrame]:
         return None
 
 
+def _fetch_intraday_min_data(symbol: str, date: str) -> Optional[pd.DataFrame]:
+    """
+    通过腾讯分时接口获取 1 分钟级别数据（push2his.eastmoney.com 在部分网络环境不可达）。
+    腾讯接口返回当天的分时数据，字段为：
+        时间(HHMM)  均价  成交量累计(手)  成交额累计(元)
+    """
+    import requests as _requests
+
+    # 腾讯接口前缀
+    mkt = "sh" if symbol.startswith("6") else "sz"
+    code = f"{mkt}{symbol}"
+
+    url = f"https://web.ifzq.gtimg.cn/appstock/app/minute/query"
+    params = {
+        "_var": f"min_data_{code}",
+        "code": code,
+        "r": "0.618",  # 随机参数，防缓存
+    }
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Referer": "https://gu.qq.com/",
+    }
+
+    resp = _requests.get(url, params=params, headers=headers, timeout=15)
+    resp.raise_for_status()
+
+    # 腾讯返回 JSONP 格式：min_data_sh601127={...}
+    text = resp.text
+    json_start = text.index("{")
+    data_json = __import__("json").loads(text[json_start:])
+
+    raw_data = (
+        data_json.get("data", {})
+        .get(code, {})
+        .get("data", {})
+        .get("data", [])
+    )
+    if not raw_data:
+        return None
+
+    # 解析：每行 "HHMM 均价 成交量累计(手) 成交额累计(元)"
+    rows = []
+    for item in raw_data:
+        parts = item.split()
+        if len(parts) < 4:
+            continue
+        time_str = parts[0]   # "0930"
+        avg_price = float(parts[1])
+        vol_cum   = float(parts[2])  # 累计成交量（手）
+        amt_cum   = float(parts[3])  # 累计成交额（元）
+        rows.append({
+            "time_str": time_str,
+            "均价": avg_price,
+            "vol_cum": vol_cum,
+            "amt_cum": amt_cum,
+        })
+
+    if not rows:
+        return None
+
+    df_raw = pd.DataFrame(rows)
+
+    # 时间 → 当天 datetime（用传入 date 拼接）
+    df_raw["时间"] = pd.to_datetime(
+        date + " " + df_raw["time_str"].str[:2] + ":" + df_raw["time_str"].str[2:],
+        format="%Y-%m-%d %H:%M"
+    )
+    df_raw = df_raw.set_index("时间")
+
+    # 差分还原每分钟成交量/成交额（累计 → 增量）
+    df_raw["成交量"] = df_raw["vol_cum"].diff().fillna(df_raw["vol_cum"].iloc[0]).clip(lower=0)  # 手
+    df_raw["成交额"] = df_raw["amt_cum"].diff().fillna(df_raw["amt_cum"].iloc[0]).clip(lower=0)  # 元
+
+    # ⚠️ 关键修正：「均价」是腾讯接口的累计 VWAP（从开盘到当前时刻的加权均价）
+    # 不能直接用于早/尾盘价格判断，否则 morning_high 会是早盘 VWAP 而非实际高点
+    # 正确做法：用「本分钟增量成交额 / (本分钟增量成交量 * 100股/手)」还原每分钟的实际成交价
+    mask = df_raw["成交量"] > 0
+    df_raw["实际价"] = 0.0
+    df_raw.loc[mask, "实际价"] = df_raw.loc[mask, "成交额"] / (df_raw.loc[mask, "成交量"] * 100)
+    # 无成交量分钟（停牌/午休边界）用前向填充
+    df_raw["实际价"] = df_raw["实际价"].replace(0, float("nan")).ffill().bfill()
+    # 再兜底：如果还有 NaN，用腾讯的均价
+    df_raw["实际价"] = df_raw["实际价"].fillna(df_raw["均价"])
+
+    df_raw["收盘"] = df_raw["实际价"]
+    df_raw["开盘"] = df_raw["实际价"]
+    df_raw["最高"] = df_raw["实际价"]
+    df_raw["最低"] = df_raw["实际价"]
+
+
+    # 筛选目标日期的交易时段
+    start_ts = f"{date} 09:30:00"
+    end_ts   = f"{date} 15:00:00"
+    result = df_raw[start_ts:end_ts].copy()
+    return result if not result.empty else None
+
+
+
+
+def get_intraday_features(symbol: str, date: str = None) -> Dict[str, Any]:
+    """
+    获取分时指标（早盘/尾盘特征、VWAP 等）。
+    优先直接请求东方财富分时接口（带 User-Agent，解决 RemoteDisconnected）；
+    若失败则回退到 akshare。
+    如果传入 date 没有数据（例如非交易日），最多回溯 5 天。
+    """
+    if date is None:
+        date = datetime.now().strftime('%Y-%m-%d')
+
+    try:
+        df = None
+        target_date = date
+
+        # 回溯最多 5 天，找到有数据的日期
+        for _ in range(5):
+            # 优先用自实现的带 header 请求
+            try:
+                df = _fetch_intraday_min_data(symbol, target_date)
+            except Exception as req_e:
+                print(f"⚠️ 直接请求分时接口失败({target_date}): {req_e}，尝试 akshare 回退...")
+                try:
+                    df = ak.stock_zh_a_hist_min_em(
+                        symbol=symbol,
+                        start_date=f"{target_date} 09:30:00",
+                        end_date=f"{target_date} 15:00:00",
+                        period="1",
+                        adjust=""
+                    )
+                    if df is not None and not df.empty:
+                        # akshare 返回时已 reset_index，需重新建时间索引
+                        df['时间'] = pd.to_datetime(df['时间'])
+                        df = df.set_index('时间')
+                except Exception:
+                    df = None
+
+            if df is not None and not df.empty:
+                break
+
+            # 回推一天
+            dt = datetime.strptime(target_date, '%Y-%m-%d')
+            target_date = (dt - timedelta(days=1)).strftime('%Y-%m-%d')
+
+        if df is None or df.empty:
+            return {"error": "无数据"}
+
+        # 确保索引为 DatetimeIndex（兼容两种来源）
+        if not isinstance(df.index, pd.DatetimeIndex):
+            df.index = pd.to_datetime(df.index)
+
+        # 3. 计算全天 VWAP
+        # 腾讯接口成交量单位是「手」（1手=100股），成交额单位是「元」
+        # 优先用「均价」列进行成交量加权（更准确）
+        total_volume = df['成交量'].sum()  # 单位：手
+        total_amount = df['成交额'].sum()  # 单位：元
+        if total_volume > 0 and total_amount > 0:
+            # VWAP = 成交额(元) / (成交量(手) * 100股/手) = 元/股
+            vwap = total_amount / (total_volume * 100)
+        elif '均价' in df.columns and df['均价'].sum() > 0:
+            # 兜底：用均价按成交量加权均值
+            vwap = (df['均价'] * df['成交量']).sum() / total_volume if total_volume > 0 else df['均价'].mean()
+        else:
+            vwap = df['收盘'].mean()
+
+        close_price = df['收盘'].iloc[-1]
+        vwap_pct = round((close_price - vwap) / vwap * 100, 2) if vwap > 0 else 0.0
+
+        # 4. 提取早盘 (9:30-10:00) 和尾盘 (14:00-15:00)
+        early_df = df.between_time('09:30', '10:00')
+        # 尾盘用 14:00-15:00（更宽，避免涨停封板时 14:30 后零成交）
+        late_df  = df.between_time('14:00', '15:00')
+        # 过滤掉成交量为 0 的行（涨停封板后无真实成交）
+        late_df_active = late_df[late_df['成交量'] > 0]
+
+        if early_df.empty:
+            return {"error": "数据不完整，无法提取早盘特征"}
+
+        # --- 早盘走势判断 ---
+        # 「冲高回落」需要满足：早盘最高点明显（>0.5%）高于收盘时刻
+        # 避免把正常微小波动误判为回落
+        early_high   = float(early_df['最高'].max())
+        early_last   = float(early_df['收盘'].iloc[-1])
+        pullback_pct = (early_high - early_last) / early_high * 100 if early_high > 0 else 0
+        if pullback_pct > 0.5:
+            early_action = "冲高回落"
+        elif early_last >= early_high * 0.999:
+            early_action = "强势上攻"
+        else:
+            early_action = "强势震荡"
+
+        # --- 尾盘走势判断 ---
+        if not late_df_active.empty:
+            # 有活跃成交：比较尾盘区间首末价格
+            late_action = "尾盘抢筹" if late_df_active['收盘'].iloc[-1] > late_df_active['收盘'].iloc[0] else "尾盘走弱"
+        elif not late_df.empty:
+            # 涨停/跌停封板：以封板状态判断
+            late_action = "涨停封板" if float(late_df['收盘'].iloc[-1]) > float(late_df['收盘'].iloc[0]) else "跌停封板"
+        else:
+            late_action = "数据不足"
+
+        # 尾盘成交量占比（有活跃成交则用活跃区间，否则用全部）
+        late_vol = late_df_active['成交量'].sum() if not late_df_active.empty else late_df['成交量'].sum()
+        late_volume_ratio = round(late_vol / total_volume * 100, 2) if total_volume > 0 else 0.0
+
+        return {
+            "date": target_date,                              # 实际取到数据的日期（回溯后）
+            "vwap": round(vwap, 2),                           # 成交量加权均价
+            "close_vs_vwap_pct": vwap_pct,                   # 收盘偏离 VWAP %
+            "vwap_status": "溢价(多头控盘)" if vwap_pct > 0 else "折价(受制均线)",
+            "morning_action": early_action,                   # 早盘走势
+            "morning_high": round(early_high, 2),             # 早盘最高价
+            "morning_pullback_pct": round(pullback_pct, 2),  # 早盘回落幅度（用于 AI 参考）
+            "late_action": late_action,                       # 尾盘走势
+            "late_volume_ratio": late_volume_ratio            # 尾盘成交量占比 %
+        }
+
+
+    except Exception as e:
+        print(f"⚠️ Error fetching intraday features for {symbol}: {e}")
+        return {"error": str(e)}
+
+
 def fetch_cyq_data(symbol: str) -> Optional[Dict[str, float]]:
     """
     获取最新筹码分布数据 (CYQ - Cost Distribution)
