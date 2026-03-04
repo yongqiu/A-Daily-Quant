@@ -74,20 +74,55 @@
 
           <!-- Prompt Editor -->
           <div v-if="activeTab === 'prompt'" class="flex-grow flex flex-col min-h-0">
-            <div class="p-6 flex-grow">
-              <div class="relative h-full">
+            <div class="flex-grow flex min-h-0">
+              <!-- Editor Left -->
+              <div class="flex-1 p-6 relative">
                 <textarea
                   v-model="strategyStore.selectedStrategy.template_content"
                   class="code-editor w-full h-full resize-none"
-                  placeholder="输入 Prompt 模板...支持使用 {variable} 格式的占位符"></textarea>
+                  placeholder="输入 Prompt 模板...支持使用 {{ variable }} 格式的占位符"></textarea>
                 <!-- Editor glow effect -->
-                <div class="absolute inset-0 pointer-events-none rounded-lg border border-primary/0 transition-colors duration-200 group-hover:border-primary/10"></div>
+                <div class="absolute inset-x-6 inset-y-6 pointer-events-none rounded-lg border border-primary/0 transition-colors duration-200 group-hover:border-primary/10"></div>
+              </div>
+
+              <!-- Dictionary Sidebar Right -->
+              <div class="w-72 border-l border-border-subtle bg-bg-elevated/20 flex flex-col hidden lg:flex">
+                <div class="px-4 py-3 border-b border-border-subtle flex items-center justify-between">
+                  <h3 class="text-[11px] font-semibold text-text-primary uppercase tracking-wider flex items-center gap-2">
+                    <DocumentTextIcon class="w-3.5 h-3.5"/>
+                    可用变量字典
+                  </h3>
+                </div>
+                <div class="flex-1 overflow-y-auto p-4 space-y-3 scrollbar-thin">
+                  <div class="bg-primary/5 rounded border border-primary/10 p-2.5 mb-2">
+                    <p class="text-[10px] text-primary/90 leading-relaxed">
+                      点击变量复制。在模板中使用 <span class="font-mono bg-bg-card px-1 py-0.5 rounded text-primary">{{ 变量名 }}</span> 调用。
+                    </p>
+                  </div>
+                  
+                  <div v-for="item in strategyStore.contextSchema" :key="item.name" class="group relative">
+                    <div class="flex items-center justify-between mb-1">
+                      <code @click="copyToClipboard(`{{ ${item.name} }}`)" 
+                            class="text-[11px] font-mono text-cyan cursor-pointer hover:bg-primary/10 px-1 py-0.5 -ml-1 rounded transition-colors"
+                            title="点击复制标签">
+                        {{ item.name }}
+                      </code>
+                      <span class="text-[9px] text-text-tertiary px-1.5 rounded-full border border-border-subtle bg-bg-card">{{ item.type.split('|')[0] }}</span>
+                    </div>
+                    <p class="text-[10px] text-text-secondary leading-snug">{{ item.desc }}</p>
+                  </div>
+                  <div v-if="!strategyStore.contextSchema?.length" class="text-xs text-text-tertiary text-center py-4">
+                    读取字典中...
+                  </div>
+                </div>
               </div>
             </div>
+
+            <!-- Footer Toolbar -->
             <div class="p-5 border-t border-border-subtle flex justify-between items-center bg-bg-elevated/30">
               <div class="flex items-center gap-2 text-[10px] text-text-tertiary">
                 <InformationCircleIcon class="w-3.5 h-3.5" />
-                <span>支持使用 {variable} 格式的占位符</span>
+                <span>右侧变量可直接点击复制。如果对象未求值，可以使用 Jinja 默认滤镜如 |default(0)</span>
               </div>
               <button @click="saveTemplate" :disabled="saving" class="btn-primary flex items-center gap-2">
                 <div v-if="saving" class="spinner w-4 h-4 border-2 border-white/30 border-t-white"></div>
@@ -162,6 +197,15 @@ const savingParam = ref(null)
 
 const selectedStrategyId = computed(() => strategyStore.selectedStrategy?.id)
 
+const copyToClipboard = async (text) => {
+  try {
+    await navigator.clipboard.writeText(text)
+    // Optional: could add a tiny flash or temporary tooltip here
+  } catch (err) {
+    console.error('Failed to copy: ', err)
+  }
+}
+
 const selectStrategy = async (strategy) => {
   await strategyStore.fetchStrategy(strategy.slug)
 }
@@ -204,6 +248,7 @@ const saveParam = async (key, value) => {
 
 onMounted(() => {
   strategyStore.fetchStrategies()
+  strategyStore.fetchContextSchema()
 })
 </script>
 

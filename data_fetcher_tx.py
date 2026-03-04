@@ -203,32 +203,32 @@ def get_stock_realtime_tx(symbol: str) -> dict:
             weibi = (total_bid_vol - total_ask_vol) / (total_bid_vol + total_ask_vol) * 100
 
         data = {
-
-            'symbol': parts[2],
-            'name': parts[1],
-            'price': float(parts[3]),
-            'change_pct': float(parts[32]),
-            'volume_ratio': float(parts[49]) if parts[49] else 0,
-            'turnover_rate': float(parts[38]) if parts[38] else 0,
-            'pe_ttm': float(parts[39]) if parts[39] else 0,
-            'mcap_float': float(parts[44]) * 100000000 if parts[44] else 0,
-            'volume': float(parts[36]) * 100,
-            'amount': float(parts[37]) * 10000,
-            'open': float(parts[5]),
-            'pre_close': float(parts[4]),
-            'high': float(parts[33]),
-            'low': float(parts[34]),
-            'bid1': float(parts[9]) if parts[9] else 0,
-            'bid1_vol': int(parts[10]) if parts[10] else 0,
-            'ask1': float(parts[19]) if parts[19] else 0,
-            'ask1_vol': int(parts[20]) if parts[20] else 0,
-            'vwap': round(vwap, 3),
-            'weibi': round(weibi, 2),
-            'bid_vols': bid_vols,
-            'ask_vols': ask_vols
+            'symbol': parts[2], # 股票代码
+            'name': parts[1], # 股票名称
+            'price': float(parts[3]), # 当前价格
+            'change_pct': float(parts[32]), # 涨跌幅
+            'volume_ratio': float(parts[49]) if parts[49] else 0, # 量比
+            'turnover_rate': float(parts[38]) if parts[38] else 0, # 换手率
+            'pe_ttm': float(parts[39]) if parts[39] else 0, # 市盈率    
+            'mcap_float': float(parts[44]) * 100000000 if parts[44] else 0, # 流通市值
+            'volume': float(parts[36]) * 100, # 成交量
+            'amount': float(parts[37]) * 10000, # 成交额
+            'open': float(parts[5]), # 开盘价
+            'pre_close': float(parts[4]), # 昨收价
+            'high': float(parts[33]), # 最高价
+            'low': float(parts[34]), # 最低价
+            'bid1': float(parts[9]) if parts[9] else 0, # 买一价
+            'bid1_vol': int(parts[10]) if parts[10] else 0, # 买一量
+            'ask1': float(parts[19]) if parts[19] else 0, # 卖一价
+            'ask1_vol': int(parts[20]) if parts[20] else 0, # 卖一量
+            'vwap': round(vwap, 3), # 平均成交价
+            'weibi': round(weibi, 2), # 委比
+            'bid_vols': bid_vols, # 委买量
+            'ask_vols': ask_vols # 委卖量
         }
+        print(f"✅ Fetched realtime data for {symbol} from Tencent: {data}")
         return data
         
     except Exception as e:
-        print(f"❌ Error fetching {symbol} from Tencent: {e}")
+        print(f"❌ Error fetching realtime data for {symbol} from Tencent: {e}")
         return None
