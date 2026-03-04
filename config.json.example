@@ -12,7 +12,7 @@
     "db": "db_daily_strategy"
   },
   "api": {
-    "provider": "gemini-openai"
+    "provider": "deepseek"
   },
   "api_gemini-openai": {
     "provider": "gemini-openai",
@@ -37,7 +37,7 @@
     "provider": "deepseek",
     "api_key": "",
     "base_url": "https://api.lkeap.cloud.tencent.com/v1",
-    "model": "deepseek-v3.1"
+    "model": "deepseek-chat"
   },
   "analysis": {
     "lookback_days": 365,

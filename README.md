@@ -109,28 +109,36 @@ cp config.json.example config.json
     "user": "root",
     "password": "",
     "db": "db_daily_strategy"
-  },
-  "api": {
-    "provider": "gemini-openai"
-  },
-  "api_gemini-openai": {
-    "provider": "gemini-openai",
-    "api_key": "your-api-key",
-    "base_url": "",
-    "model": "gemini-3-pro-high"
-  }
-  //...
-}
+#### 2. 一键启动向导 (推荐)
+
+本项目内置了初始化向导，确保在项目根目录执行：
+
+```bash
+# 确保已进入虚拟环境
+python start.py
 ```
 
-`start.py` 脚本会自动完成以下所有工作：
-1. 检查 Python 版本。
-2. 自动检查并为您安装所需的依赖库 (`requirements.txt`)。
-3. 交互式引导填入 API Key（如果您是第一次运行）。
-4. 静默创建高能本地数据库 (`SQLite`) 并灌入预设策略。
-5. 一键拉起 Web 看板服务并在浏览器中为您打开。
+`start.py` 会自动完成：环境检查、依赖安装、**交互式生成配置文件**、初始化数据库、并最终拉起 Web 看板。
 
-> **进阶提示**: 您也可以随后修改根目录生成的 `config.json` 来调整大模型通道，或在里面显式配置 MySQL 等外置数据库（对高阶用户完全兼容）。
+#### 3. 手动配置 (进阶)
+
+如果您更倾向于手动管理配置，或需要使用 MySQL 数据库，请执行：
+
+1. **复制示例文件**：
+   ```bash
+   cp config.json.example config.json
+   ```
+2. **编辑配置**：
+   使用编辑器打开 `config.json`，根据注释填入你的 `tushare_token` (数据获取) 以及 `api_key` (LLM 支持)。
+   
+   ps:强烈建议使用tushare的pro接口，如果没有也没关系，会降级到akshare获取免费的行情数据
+3. **数据库声明**：
+   - 默认使用 `sqlite`：无需任何操作。
+   - 使用 `mysql`：需在 `database` 字段中将 `type` 改为 `mysql` 并填入相关地址。
+
+---
+
+> **进阶提示**: 您可以随时修改 `config.json` 来切换不同的 LLM 通道（支持 DeepSeek, Gemini, OpenAI 等）。
 
 #### 🤖 生成每日策略研报 (CLI模式)
 
