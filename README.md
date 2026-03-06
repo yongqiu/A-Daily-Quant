@@ -78,8 +78,8 @@ graph TD
 ### 1. 克隆代码
 
 ```bash
-git clone https://github.com/yongqiu/A-Daily-Quant.git
-cd A-Daily-Quant
+git clone https://github.com/cyecho-io/A-Daily-TradingAgents.git
+cd A-Daily-TradingAgents
 ```
 
 ### 2. 一键启动向导
@@ -183,4 +183,4 @@ python main.py --section all
 本项目仅供技术研究与学习交流使用。**市场有风险，投资需谨慎**。项目中的任何策略或分析结果均不构成投资建议。
 
 ---
-*Powered by A-Daily-Quant Team*
+*Powered by Cyecho*
