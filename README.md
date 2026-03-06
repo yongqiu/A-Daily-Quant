@@ -1,4 +1,4 @@
-# A-Daily-Quant (A股量化决策系统)
+# A-Daily-Quant (A股多Agents股票分析系统)
 
 <div align="center">
   <img src="https://img.shields.io/badge/Python-3.9+-blue.svg" alt="Python">
