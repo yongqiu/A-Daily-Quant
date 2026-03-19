@@ -4,7 +4,7 @@ A股策略监控系统 Web 服务器
 为前端提供 API 并运行后台监控任务。
 """
 
-from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
+from fastapi import FastAPI, Request, BackgroundTasks, HTTPException, Query
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -715,7 +715,11 @@ realtime_analysis_status = {}  # {symbol: {"status": "idle"|"running"|"success"|
 
 
 @app.post("/api/analyze/{symbol}/score")
-async def calculate_stock_score(symbol: str):
+async def calculate_stock_score(
+    symbol: str,
+    score_mode: str = Query("legacy"),
+    trade_date: Optional[str] = Query(None),
+):
     """
     阶段 1：仅计算指标和评分（无 AI 分析）。
     保存到 'daily_metrics' 表。
@@ -734,7 +738,12 @@ async def calculate_stock_score(symbol: str):
 
         # 2. 调用统一评分模块
         latest = get_score(
-            symbol, cost_price=cost_price, asset_type=asset_type, include_news=True
+            symbol,
+            cost_price=cost_price,
+            asset_type=asset_type,
+            include_news=True,
+            score_mode=score_mode,
+            trade_date=trade_date,
         )
 
         if not latest:
@@ -747,10 +756,16 @@ async def calculate_stock_score(symbol: str):
         )
         print(f"   {latest}")
 
+        if score_mode != "legacy":
+            return {
+                "status": "success",
+                "message": "指标计算完成",
+                "data": latest,
+            }
+
         # 3. 后处理：保存到 daily_metrics
         today = datetime.now().strftime("%Y-%m-%d")
 
-        # 处理模式列表为字符串
         pattern_list = latest.get("pattern_details", [])
         latest["pattern_flags"] = ",".join(pattern_list) if pattern_list else ""
 
@@ -762,8 +777,7 @@ async def calculate_stock_score(symbol: str):
                 "message": "指标计算完成，已存入数据库",
                 "data": latest,
             }
-        else:
-            return JSONResponse(status_code=500, content={"message": "数据库保存失败"})
+        return JSONResponse(status_code=500, content={"message": "数据库保存失败"})
 
     except Exception as e:
         print(f"Calculate Score Error: {e}")
@@ -774,10 +788,35 @@ async def calculate_stock_score(symbol: str):
 
 
 @app.get("/api/analyze/{symbol}/metrics")
-async def get_stock_metrics(symbol: str, date: str = None):
+async def get_stock_metrics(
+    symbol: str,
+    date: str = None,
+    score_mode: str = Query("legacy"),
+):
     """从数据库获取计算的指标评分"""
     if not date:
         date = datetime.now().strftime("%Y-%m-%d")
+
+    if score_mode != "legacy":
+        holdings = database.get_all_holdings()
+        stock_info = next((h for h in holdings if h["symbol"] == symbol), None)
+        cost_price = float(stock_info.get("cost_price") or 0) if stock_info else 0.0
+        asset_type = stock_info.get("asset_type", "stock") if stock_info else "stock"
+
+        metrics = get_score(
+            symbol,
+            cost_price=cost_price,
+            asset_type=asset_type,
+            include_news=False,
+            score_mode=score_mode,
+            trade_date=date,
+        )
+        if metrics:
+            return {"status": "success", "data": metrics}
+        return {
+            "status": "not_found",
+            "message": "No metrics found for this date and score mode",
+        }
 
     metrics = database.get_daily_metrics(symbol, date)
     if metrics:

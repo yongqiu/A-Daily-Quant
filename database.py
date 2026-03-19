@@ -17,21 +17,37 @@ from typing import List, Dict, Any, Optional
 try:
     import yaml
 except ImportError:
-    pass
+    yaml = None
 
 AGENTS_YAML_FILE = "agents.yaml"
+_agents_yaml_cache: Dict[str, Any] = {}
+_agents_yaml_mtime: Optional[float] = None
+_agents_yaml_warning_emitted = False
 
 
 def _load_agents_from_yaml() -> Dict[str, Any]:
+    global _agents_yaml_cache, _agents_yaml_mtime, _agents_yaml_warning_emitted
+
     if not os.path.exists(AGENTS_YAML_FILE):
+        _agents_yaml_cache = {}
+        _agents_yaml_mtime = None
         return {}
+
+    if yaml is None:
+        if not _agents_yaml_warning_emitted:
+            print("⚠️ PyYAML not installed, skipping agents.yaml parsing")
+            _agents_yaml_warning_emitted = True
+        return {}
+
     try:
+        current_mtime = os.path.getmtime(AGENTS_YAML_FILE)
+        if _agents_yaml_mtime == current_mtime:
+            return _agents_yaml_cache
+
         with open(AGENTS_YAML_FILE, "r", encoding="utf-8") as f:
-            if "yaml" in globals():
-                return yaml.safe_load(f) or {}
-            else:
-                print("⚠️ PyYAML not installed, skipping agents.yaml parsing")
-                return {}
+            _agents_yaml_cache = yaml.safe_load(f) or {}
+            _agents_yaml_mtime = current_mtime
+            return _agents_yaml_cache
     except Exception as e:
         print(f"❌ Error loading {AGENTS_YAML_FILE}: {e}")
         return {}

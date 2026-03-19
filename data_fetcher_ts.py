@@ -423,7 +423,7 @@ def fetch_index_daily_ts(
         if not end_date:
             end_date = datetime.now().strftime("%Y%m%d")
 
-        print(f"📉 Fetching Index Data for {ts_symbol}...")
+        print(f"👆🏻 Fetching Index Data for {ts_symbol}...")
         df = pro.index_daily(
             ts_code=ts_symbol, start_date=start_date, end_date=end_date
         )

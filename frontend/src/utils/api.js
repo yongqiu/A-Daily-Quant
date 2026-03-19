@@ -58,12 +58,21 @@ export const apiMethods = {
   // 分析
 
 
-  calculateStockScore: (symbol) => api.post(`/analyze/${symbol}/score`),
+  calculateStockScore: (symbol, scoreMode = 'legacy', tradeDate = null) =>
+    api.post(`/analyze/${symbol}/score`, null, {
+      params: {
+        score_mode: scoreMode,
+        ...(tradeDate ? { trade_date: tradeDate } : {})
+      }
+    }),
 
-  getStockMetrics: (symbol, date) => {
-    const params = date ? `?date=${date}` : ''
-    return api.get(`/analyze/${symbol}/metrics${params}`)
-  },
+  getStockMetrics: (symbol, date, scoreMode = 'legacy') =>
+    api.get(`/analyze/${symbol}/metrics`, {
+      params: {
+        ...(date ? { date } : {}),
+        score_mode: scoreMode,
+      }
+    }),
 
   getAgents: () => api.get('/agents'),
 

@@ -178,6 +178,25 @@
                 
                 <!-- 1. Score Card Section -->
                 <div class="flex-shrink-0 px-4 pt-4 pb-2">
+                    <div class="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                        <div class="text-[11px] font-semibold uppercase tracking-[0.24em] text-text-tertiary">
+                            评分模型
+                        </div>
+                        <div class="inline-flex w-full sm:w-auto rounded-xl border border-border-subtle bg-bg-elevated/60 p-1">
+                            <button
+                                v-for="mode in scoreModeOptions"
+                                :key="mode.value"
+                                @click="selectedScoreMode = mode.value"
+                                class="flex-1 sm:flex-none rounded-lg px-3 py-1.5 text-xs font-medium transition-all"
+                                :class="selectedScoreMode === mode.value
+                                  ? 'bg-primary/15 text-primary border border-primary/20'
+                                  : 'text-text-tertiary hover:text-text-secondary'"
+                            >
+                                {{ mode.label }}
+                            </button>
+                        </div>
+                    </div>
+
                     <StockScoreCard
                         v-if="scoreResult"
                         :metrics="scoreResult"
@@ -277,6 +296,11 @@ import {
 } from '@heroicons/vue/24/outline'
 
 console.log('ScreenerView: SETUP START')
+const SCORE_MODE_STORAGE_KEY = 'stock-score-mode'
+const scoreModeOptions = [
+  { label: '原评分方式', value: 'legacy' },
+  { label: 'Alpha158 + LightGBM', value: 'alpha158_lightgbm' },
+]
 
 // State (List)
 const selections = ref([])
@@ -291,6 +315,7 @@ const selectedStockSymbol = ref(null)
 // State (Detail)
 const scoreResult = ref(null)
 const calculatingScore = ref(false)
+const selectedScoreMode = ref(localStorage.getItem(SCORE_MODE_STORAGE_KEY) || 'legacy')
 const activeAnalyzerTab = ref('single_expert') // Default to single_expert (Candidate Mode)
 const analyzing = ref(false)
 const loadingAnalysis = ref(false)
@@ -428,7 +453,7 @@ const loadStockMetrics = async (symbol) => {
     calculatingScore.value = true
     try {
         const date = selectedDate.value || null
-        const response = await apiMethods.getStockMetrics(symbol, date)
+        const response = await apiMethods.getStockMetrics(symbol, date, selectedScoreMode.value)
         if (response.status === 'success') {
             scoreResult.value = response.data
         } else {
@@ -449,7 +474,11 @@ const runScoreCalculation = async () => {
     if (!selectedStockSymbol.value) return
     calculatingScore.value = true
     try {
-        const res = await apiMethods.calculateStockScore(selectedStockSymbol.value)
+        const res = await apiMethods.calculateStockScore(
+          selectedStockSymbol.value,
+          selectedScoreMode.value,
+          selectedDate.value || getCurrentDateString()
+        )
         if (res.status === 'success') {
             scoreResult.value = res.data
         }
@@ -610,6 +639,13 @@ const getCurrentDateString = () => {
 watch(showKlineChart, (newValue) => {
   if (newValue && selectedStockSymbol.value) {
     loadKlineData(selectedStockSymbol.value)
+  }
+})
+
+watch(() => selectedScoreMode.value, (mode) => {
+  localStorage.setItem(SCORE_MODE_STORAGE_KEY, mode)
+  if (selectedStockSymbol.value) {
+    loadStockMetrics(selectedStockSymbol.value)
   }
 })
 

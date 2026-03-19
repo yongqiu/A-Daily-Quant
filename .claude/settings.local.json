@@ -12,7 +12,8 @@
       "Bash(pkill:*)",
       "Bash(curl:*)",
       "Bash(source venv/bin/activate)",
-      "Bash(npm install:*)"
+      "Bash(npm install:*)",
+      "Bash(conda info:*)"
     ]
   }
 }

@@ -564,7 +564,7 @@ class MonitorEngine:
         if cache["data"] is None:
             # Fetch fresh data (30 days to ensure enough for MA20)
             start_date = (now - timedelta(days=40)).strftime("%Y%m%d")
-            print("📉 Fetching fresh Market Index History (000001.SH)...")
+            print("👆🏻 Fetching fresh Market Index History (000001.SH)...")
             df = fetch_index_daily_ts("000001.SH", start_date=start_date)
 
             if df is not None and not df.empty:

@@ -19,12 +19,16 @@
           </span>
           <span class="text-[10px] tracking-widest text-text-tertiary opacity-80">{{ metrics?.rating?.split(' ').slice(1).join(' ') || '🟢🟢🟢' }}</span>
         </div>
+        <span v-if="metrics?.score_mode_label"
+              class="hidden sm:inline-flex px-2 py-1 rounded-full border border-primary/20 bg-primary/10 text-[10px] font-semibold tracking-wide text-primary">
+          {{ metrics?.score_mode_label }}
+        </span>
       </div>
       
       <!-- Right: Date & Refresh Action -->
       <div class="flex items-center gap-2">
         <div class="text-[10px] text-text-tertiary bg-bg-elevated px-2 py-1 rounded">
-          {{ metrics?.date }}
+          {{ metrics?.score_date || metrics?.date }}
         </div>
         <button v-if="showRefresh" @click.stop="$emit('refresh')" :disabled="loading"
                 class="p-1.5 rounded hover:bg-bg-elevated text-text-tertiary hover:text-primary transition-colors"
@@ -32,6 +36,11 @@
           <ArrowPathIcon class="w-3.5 h-3.5" :class="{ 'animate-spin': loading }" />
         </button>
       </div>
+    </div>
+
+    <div v-if="metrics?.score_mode_note"
+         class="px-4 py-2 text-[11px] text-text-secondary border-b border-border-subtle bg-bg-elevated/20">
+      {{ metrics?.score_mode_note }}
     </div>
 
     <!-- Score Details (Expandable) -->
@@ -162,6 +171,12 @@ const getScoreColor = (score) => {
 }
 
 const getBarStyle = (current, max) => {
+    if (!max || max <= 0) {
+        return {
+            width: '0%',
+            backgroundColor: 'rgb(99 102 241 / 0.3)'
+        }
+    }
     const pct = current / max
     const opacity = 0.3 + (pct * 0.7)
     return {

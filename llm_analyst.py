@@ -34,13 +34,17 @@ def get_prompt_from_db(slug: str, context: Dict[str, Any]) -> str:
     try:
         from context_builder import build_strategy_context
 
-        # Build unified strategy context object 'ctx' if we have enough raw data
+        # Respect an already prepared ctx from StrategyDataFactory. Rebuilding here
+        # can overwrite fresher values (for example volume_ratio from the factory path).
         stock_info = context.get("stock_info", {})
         tech_data = context.get("tech_data", {})
-        if stock_info or tech_data:
+        existing_ctx = context.get("ctx")
+        if not existing_ctx and (stock_info or tech_data):
             realtime_data = context.get("realtime_data", {})
             market_context = context.get("market_context", {})
-            extra_indicators = context.get("extra", {})
+            extra_indicators = context.get(
+                "extra_indicators", context.get("extra", {})
+            )
             intraday = context.get("intraday", {})
 
             clean_context = build_strategy_context(

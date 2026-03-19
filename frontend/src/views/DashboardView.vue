@@ -350,6 +350,25 @@
           
           <!-- 1. Top Section: Score Result (评分结果置顶) -->
           <div class="flex-shrink-0 px-4 pt-4 pb-2">
+             <div class="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+               <div class="text-[11px] font-semibold uppercase tracking-[0.24em] text-text-tertiary">
+                 评分模型
+               </div>
+               <div class="inline-flex w-full sm:w-auto rounded-xl border border-border-subtle bg-bg-elevated/60 p-1">
+                 <button
+                   v-for="mode in scoreModeOptions"
+                   :key="mode.value"
+                   @click="selectedScoreMode = mode.value"
+                   class="flex-1 sm:flex-none rounded-lg px-3 py-1.5 text-xs font-medium transition-all"
+                   :class="selectedScoreMode === mode.value
+                     ? 'bg-primary/15 text-primary border border-primary/20'
+                     : 'text-text-tertiary hover:text-text-secondary'"
+                 >
+                   {{ mode.label }}
+                 </button>
+               </div>
+             </div>
+
              <!-- Case A: 已有评分结果 -->
              <StockScoreCard
                  v-if="scoreResult"
@@ -477,7 +496,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, watch, computed } from 'vue'
+import { ref, onMounted, onUnmounted, watch, computed, nextTick } from 'vue'
 import { useMarketStore } from '@/stores/market'
 import { apiMethods } from '@/utils/api'
 import { useKlineChart } from '@/composables/useKlineChart'
@@ -502,6 +521,11 @@ import {
 import { StarIcon as StarIconSolid } from '@heroicons/vue/24/solid'
 
 const marketStore = useMarketStore()
+const SCORE_MODE_STORAGE_KEY = 'stock-score-mode'
+const scoreModeOptions = [
+  { label: '原评分方式', value: 'legacy' },
+  { label: 'Alpha158 + LightGBM', value: 'alpha158_lightgbm' },
+]
 
 // State
 const selectedStockSymbol = ref(null)
@@ -511,6 +535,7 @@ const analyzing = ref(false)
 const calculatingScore = ref(false)
 const scoreResult = ref(null) // Stores the metrics result
 const isScoreExpanded = ref(false)
+const selectedScoreMode = ref(localStorage.getItem(SCORE_MODE_STORAGE_KEY) || 'legacy')
 const analysisProgress = ref('')
 const analysisResult = ref('')
 const tradingPlan = ref(null)
@@ -736,7 +761,7 @@ const getScoreColor = (score) => {
 const loadStockMetrics = async (symbol, date) => {
     if (!symbol) return
     try {
-        const response = await apiMethods.getStockMetrics(symbol, date)
+        const response = await apiMethods.getStockMetrics(symbol, date, selectedScoreMode.value)
         if (response.status === 'success') {
             scoreResult.value = response.data
         } else {
@@ -765,7 +790,11 @@ const runScoreCalculation = async () => {
     
     calculatingScore.value = true
     try {
-        const res = await apiMethods.calculateStockScore(selectedStockSymbol.value)
+        const res = await apiMethods.calculateStockScore(
+          selectedStockSymbol.value,
+          selectedScoreMode.value,
+          selectedAnalysisDate.value || getCurrentDateString()
+        )
         if (res.status === 'success') {
             scoreResult.value = res.data
         }
@@ -937,13 +966,18 @@ watch(() => marketStore.isMonitoring, (newVal) => {
 //   }
 // })
 
-import { nextTick } from 'vue' // Start of file imports, but adding here for context in replace block if needed or just replace watch
-
 watch(showKlineChart, async (newValue) => {
   if (newValue && selectedStockSymbol.value) {
     // Wait for DOM to render the chart container v-if
     await nextTick()
     loadKlineData(selectedStockSymbol.value, selectedPeriod.value)
+  }
+})
+
+watch(() => selectedScoreMode.value, (mode) => {
+  localStorage.setItem(SCORE_MODE_STORAGE_KEY, mode)
+  if (selectedStockSymbol.value) {
+    loadStockMetrics(selectedStockSymbol.value, selectedAnalysisDate.value || getCurrentDateString())
   }
 })
 </script>

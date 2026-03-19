@@ -18,11 +18,22 @@ from data_fetcher import fetch_stock_news, calculate_start_date
 from indicator_calc import calculate_indicators, get_latest_metrics
 from strategies.trend_strategy import StockTrendAnalyzer
 from etf_score import apply_etf_score
+from alpha158_lightgbm_score import (
+    Alpha158LightGBMScoreError,
+    get_alpha158_lightgbm_score,
+)
 
 # 配置日志记录器
 logger = logging.getLogger(__name__)
 
-def get_score(symbol: str, cost_price: float = 0.0, asset_type: str = 'stock', include_news: bool = True) -> Optional[Dict[str, Any]]:
+def get_score(
+    symbol: str,
+    cost_price: float = 0.0,
+    asset_type: str = 'stock',
+    include_news: bool = True,
+    score_mode: str = "legacy",
+    trade_date: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
     """
     使用 Tushare 数据获取股票/ETF 的综合评分。
     
@@ -174,6 +185,34 @@ def get_score(symbol: str, cost_price: float = 0.0, asset_type: str = 'stock', i
         # 确保 'price' 键用于数据库（从 'close' 映射，如果有）
         if 'price' not in latest and 'close' in latest:
             latest['price'] = latest['close']
+
+        latest['date'] = latest.get('data_date')
+        latest['score_mode'] = 'legacy'
+        latest['score_mode_label'] = '原评分方式'
+
+        if score_mode == "alpha158_lightgbm":
+            if asset_type == "etf":
+                latest["requested_score_mode"] = score_mode
+                latest["score_mode_note"] = "ETF 暂不支持 Alpha158 + LightGBM，已保留原评分方式。"
+                return latest
+
+            latest["legacy_composite_score"] = latest.get("composite_score")
+            latest["legacy_rating"] = latest.get("rating")
+            latest["legacy_score_breakdown"] = latest.get("score_breakdown")
+            latest["legacy_score_details"] = latest.get("score_details")
+            latest["legacy_operation_suggestion"] = latest.get("operation_suggestion")
+
+            try:
+                alpha_score = get_alpha158_lightgbm_score(
+                    symbol, trade_date=trade_date or latest.get("data_date")
+                )
+                latest.update(alpha_score)
+                latest["date"] = alpha_score.get("score_date") or latest.get("data_date")
+            except Alpha158LightGBMScoreError as exc:
+                latest["requested_score_mode"] = score_mode
+                latest["score_mode_note"] = (
+                    f"Alpha158 + LightGBM 暂不可用，当前展示原评分方式。原因: {exc}"
+                )
 
         return latest
 
