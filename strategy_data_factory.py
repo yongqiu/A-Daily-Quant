@@ -3,7 +3,9 @@ from typing import Dict, Any, Optional
 from datetime import datetime
 import json
 
+from analysis_snapshot import build_analysis_snapshot, flatten_snapshot_for_legacy
 from context_builder import build_strategy_context
+from scoring_pipeline import attach_scores_to_snapshot
 
 
 class StrategyDataFactory:
@@ -39,6 +41,22 @@ class StrategyDataFactory:
         cls._cache[symbol][key] = value
 
     @classmethod
+    def _detect_asset_type(cls, symbol: str, stock_info: Dict[str, Any]) -> str:
+        asset_type = stock_info.get("asset_type", stock_info.get("type", "stock"))
+        if asset_type == "stock" and symbol.startswith(("51", "56", "58", "159")):
+            return "etf"
+        return asset_type
+
+    @classmethod
+    def _safe_float(cls, value: Any) -> Optional[float]:
+        try:
+            if value in (None, "", "N/A", "None"):
+                return None
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
     def _get_or_compute_tech_data(
         cls, symbol: str, stock_info: Dict[str, Any]
     ) -> Dict[str, Any]:
@@ -58,7 +76,7 @@ class StrategyDataFactory:
 
         lookback = config.get("analysis", {}).get("lookback_days", 180)
         start_date = calculate_start_date(lookback)
-        asset_type = stock_info.get("asset_type", stock_info.get("type", "stock"))
+        asset_type = cls._detect_asset_type(symbol, stock_info)
 
         df = fetch_data_dispatcher(symbol, asset_type, start_date)
         if df is None or df.empty:
@@ -78,6 +96,19 @@ class StrategyDataFactory:
 
             cls._set_to_cache(symbol, "tech_data", tech_data)
             return tech_data
+        return {}
+
+    @classmethod
+    def build_analysis_snapshot(
+        cls, symbol: str, context_type: str, monitor_engine=None
+    ) -> Dict[str, Any]:
+        payload = cls.build_full_strategy_context(
+            symbol=symbol,
+            context_type=context_type,
+            monitor_engine=monitor_engine,
+        )
+        if payload.get("snapshot"):
+            return payload["snapshot"]
         return {}
 
     @classmethod
@@ -181,9 +212,22 @@ class StrategyDataFactory:
                 )
 
         # 3. 压轴：直接调用 context_builder.py 进行彻底扁平化
+        snapshot = attach_scores_to_snapshot(
+            build_analysis_snapshot(
+                stock_info=stock_info,
+                metrics=tech_data,
+                realtime_data=realtime_data,
+                market_context=market_context,
+                extra_indicators=extra_info,
+                intraday=realtime_data.get("pre_daily_features", {}),
+            )
+        )
+
+        tech_view = flatten_snapshot_for_legacy(snapshot)
+
         ctx = build_strategy_context(
             stock_info=stock_info,
-            tech_data=tech_data,
+            tech_data=tech_view,
             realtime_data=realtime_data,
             market_context=market_context,
             extra_indicators=extra_info,
@@ -194,12 +238,13 @@ class StrategyDataFactory:
 
         return {
             "stock_info": stock_info,
-            "tech_data": tech_data,
+            "tech_data": tech_view,
             "realtime_data": realtime_data,
             "market_context": market_context,
             "extra_indicators": extra_info,
             "intraday": realtime_data.get("pre_daily_features", {}),
             "ctx": ctx,
+            "snapshot": snapshot,
         }
 
     @classmethod
@@ -214,6 +259,18 @@ class StrategyDataFactory:
         拉取高阶技术面因子和筹码分布数据
         """
         extra_indicators = {}
+        price = cls._safe_float(realtime_data.get("price"))
+        if price is None:
+            price = cls._safe_float(tech_data.get("close"))
+        ma20 = cls._safe_float(tech_data.get("ma20"))
+        distance_from_ma20 = cls._safe_float(tech_data.get("distance_from_ma20"))
+
+        if distance_from_ma20 is None and price is not None and ma20 not in (None, 0):
+            distance_from_ma20 = (price - ma20) / ma20 * 100
+
+        if distance_from_ma20 is not None:
+            extra_indicators["deviate_pct"] = round(distance_from_ma20, 2)
+
         if (
             analysis_type
             in [

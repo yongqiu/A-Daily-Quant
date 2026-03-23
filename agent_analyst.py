@@ -10,6 +10,8 @@ import logging
 from typing import Dict, Any, List, AsyncGenerator, Optional
 from datetime import datetime
 
+from decision_engine import derive_final_decision, extract_structured_opinion
+
 # 导入统一的分析入口
 from llm_analyst import generate_analysis
 
@@ -144,6 +146,7 @@ class MultiAgentSystem:
         )
 
         agent_results = []
+        structured_agent_outputs = []
         tasks = []
         total_agents = len(self.agents)
         current_progress = start_progress + 5
@@ -203,6 +206,14 @@ class MultiAgentSystem:
             debate_content += section_html
             yield json.dumps({"type": "token", "content": section_html})
             agent_results.append(f"【{agent.name}意见】:\n{res}")
+            structured_agent_outputs.append(
+                {
+                    "agent_slug": agent.slug,
+                    "agent_name": agent.name,
+                    "raw_text": res,
+                    "structured": extract_structured_opinion(res),
+                }
+            )
 
         # CIO 裁决：传递 agent_results 给 generate_analysis
         yield json.dumps(
@@ -221,6 +232,12 @@ class MultiAgentSystem:
             self.api_config,
             agent_results=agent_results,
         )
+        cio_structured = extract_structured_opinion(cio_result)
+        final_decision = derive_final_decision(
+            context.get("snapshot", {}),
+            agent_outputs=[item["structured"] for item in structured_agent_outputs]
+            + [cio_structured],
+        )
 
         yield json.dumps(
             {"type": "progress", "value": 95, "message": "正在生成最终报告..."}
@@ -238,8 +255,23 @@ class MultiAgentSystem:
             await asyncio.sleep(0.01)
 
         cio_section = cio_header + cio_result + "\n\n"
-        full_report = debate_content + cio_section
+        decision_section = (
+            "\n\n### 🧭 统一决策引擎\n\n"
+            f"- Final Action: **{final_decision['final_action']}**\n"
+            f"- Risk Level: **{final_decision['risk_level']}**\n"
+            f"- Consensus Level: **{final_decision['consensus_level']}**\n"
+            f"- Reasoning: {final_decision['final_reasoning']}\n\n"
+        )
+        full_report = debate_content + cio_section + decision_section
 
         yield json.dumps({"type": "progress", "value": 100, "message": "分析完成"})
-        yield json.dumps({"type": "final_html", "content": full_report})
+        yield json.dumps(
+            {
+                "type": "final_html",
+                "content": full_report,
+                "decision": final_decision,
+                "agent_outputs": structured_agent_outputs,
+                "cio_structured": cio_structured,
+            }
+        )
         yield json.dumps({"type": "complete", "content": "Done"})

@@ -82,10 +82,14 @@
 
                      <div class="flex justify-between items-center mb-1">
                         <span class="text-sm text-text-secondary truncate max-w-[120px]">{{ stock.name }}</span>
-                        <!-- Score Badge -->
-                        <span v-if="stock.composite_score" class="font-mono font-bold text-sm" :class="getScoreColor(stock.composite_score)">
-                            {{ stock.composite_score }}分
-                        </span>
+                        <div class="flex items-center gap-2">
+                          <span v-if="stock.entry_score" class="font-mono font-bold text-sm" :class="getScoreColor(stock.entry_score)">
+                              E{{ stock.entry_score }}
+                          </span>
+                          <span v-if="stock.composite_score" class="text-[11px] font-mono text-text-tertiary">
+                              旧{{ stock.composite_score }}
+                          </span>
+                        </div>
                      </div>
 
                      <!-- Active Indicator -->
@@ -202,6 +206,7 @@
                         :metrics="scoreResult"
                         :loading="calculatingScore"
                         :default-expanded="true"
+                        primary-score-mode="entry"
                         @refresh="runScoreCalculation"
                     />
                      <!-- Loading or Empty Score State -->
@@ -250,6 +255,45 @@
 
                              <!-- Analysis Result -->
                              <div v-else-if="analysisResult" class="flex-1">
+                               <div v-if="analysisMeta" class="mb-4 rounded-xl border border-border-subtle bg-bg-elevated/40 p-4">
+                                 <div class="mb-3 text-[11px] font-semibold uppercase tracking-[0.2em] text-text-tertiary">决策摘要</div>
+                                 <div class="grid gap-3 sm:grid-cols-3">
+                                   <div class="rounded-lg border border-border-subtle bg-bg/50 px-3 py-2">
+                                     <div class="text-[11px] text-text-tertiary">最终动作</div>
+                                     <div class="mt-1 text-sm font-semibold text-text-primary">{{ analysisMeta.final_action || '--' }}</div>
+                                   </div>
+                                   <div class="rounded-lg border border-border-subtle bg-bg/50 px-3 py-2">
+                                     <div class="text-[11px] text-text-tertiary">风险等级</div>
+                                     <div class="mt-1 text-sm font-semibold text-text-primary">{{ analysisMeta.risk_level || '--' }}</div>
+                                   </div>
+                                   <div class="rounded-lg border border-border-subtle bg-bg/50 px-3 py-2">
+                                     <div class="text-[11px] text-text-tertiary">共识强度</div>
+                                     <div class="mt-1 text-sm font-semibold text-text-primary">{{ analysisMeta.consensus_level || '--' }}</div>
+                                   </div>
+                                 </div>
+                               </div>
+                               <div v-if="analysisMeta?.agent_outputs?.length" class="mb-4 rounded-xl border border-border-subtle bg-bg-elevated/30 p-4">
+                                 <div class="mb-3 text-[11px] font-semibold uppercase tracking-[0.2em] text-text-tertiary">专家结构化意见</div>
+                                 <div class="space-y-3">
+                                   <div v-for="agent in analysisMeta.agent_outputs" :key="agent.agent_slug || agent.agent_name" class="rounded-lg border border-border-subtle bg-bg/50 p-3">
+                                     <div class="flex items-center justify-between gap-3">
+                                       <div class="text-sm font-semibold text-text-primary">{{ agent.agent_name || agent.agent_slug || 'Agent' }}</div>
+                                       <div class="text-[11px] text-text-secondary">
+                                         <span class="mr-3">态度: {{ agent.structured?.stance || '--' }}</span>
+                                         <span>动作: {{ agent.structured?.final_action || '--' }}</span>
+                                       </div>
+                                     </div>
+                                     <div v-if="agent.structured?.machine_score_judgement" class="mt-2 text-xs text-text-secondary">
+                                       {{ agent.structured.machine_score_judgement }}
+                                     </div>
+                                     <div v-if="agent.structured?.key_evidence?.length" class="mt-2 flex flex-wrap gap-2">
+                                       <span v-for="(evidence, idx) in agent.structured.key_evidence" :key="idx" class="rounded-full border border-border-subtle bg-bg-elevated px-2 py-1 text-[11px] text-text-secondary">
+                                         {{ evidence }}
+                                       </span>
+                                     </div>
+                                   </div>
+                                 </div>
+                               </div>
                                <div class="prose max-w-none pb-4" v-html="analysisResult"></div>
                              </div>
 
@@ -299,8 +343,11 @@ console.log('ScreenerView: SETUP START')
 const SCORE_MODE_STORAGE_KEY = 'stock-score-mode'
 const scoreModeOptions = [
   { label: '原评分方式', value: 'legacy' },
-  { label: 'Alpha158 + LightGBM', value: 'alpha158_lightgbm' },
 ]
+
+const normalizeScoreMode = (mode) => {
+  return scoreModeOptions.some(option => option.value === mode) ? mode : 'legacy'
+}
 
 // State (List)
 const selections = ref([])
@@ -315,12 +362,13 @@ const selectedStockSymbol = ref(null)
 // State (Detail)
 const scoreResult = ref(null)
 const calculatingScore = ref(false)
-const selectedScoreMode = ref(localStorage.getItem(SCORE_MODE_STORAGE_KEY) || 'legacy')
+const selectedScoreMode = ref(normalizeScoreMode(localStorage.getItem(SCORE_MODE_STORAGE_KEY)))
 const activeAnalyzerTab = ref('single_expert') // Default to single_expert (Candidate Mode)
 const analyzing = ref(false)
 const loadingAnalysis = ref(false)
 const analysisProgress = ref('')
 const analysisResult = ref('')
+const analysisMeta = ref(null)
 const showKlineChart = ref(false)
 const chartContainer = ref(null)
 
@@ -363,6 +411,7 @@ const selectStock = (stock) => {
     // Reset Data
     scoreResult.value = null
     analysisResult.value = ''
+    analysisMeta.value = null
     
     // Fetch Detail Data
     loadDetailData(stock.symbol)
@@ -492,9 +541,11 @@ const runScoreCalculation = async () => {
 const loadLatestAnalysis = async (symbol) => {
     loadingAnalysis.value = true
     analysisResult.value = ''
+    analysisMeta.value = null
     try {
         const response = await apiMethods.getLatestAnalysis(symbol, activeAnalyzerTab.value)
         if (response.status === 'success') {
+            analysisMeta.value = response.data || null
             if (response.data?.ai_analysis) {
                 try {
                   analysisResult.value = marked.parse(response.data.ai_analysis)
@@ -516,9 +567,11 @@ const loadLatestAnalysis = async (symbol) => {
 const loadHistoryAnalysis = async (symbol, date) => {
     loadingAnalysis.value = true
     analysisResult.value = ''
+    analysisMeta.value = null
     try {
         const response = await apiMethods.getAnalysisHistory(symbol, date, activeAnalyzerTab.value)
         if (response.status === 'success') {
+            analysisMeta.value = response.data || null
             if (response.data?.ai_analysis) {
                  try {
                   analysisResult.value = marked.parse(response.data.ai_analysis)
@@ -546,12 +599,14 @@ const runAIAnalysis = async () => {
   analyzing.value = true
   analysisProgress.value = 'Initializing analysis...'
   analysisResult.value = ''
+  analysisMeta.value = null
   let accumulatedMarkdown = ''
 
   try {
     await apiMethods.analyzeStockStream(
       selectedStockSymbol.value,
       activeAnalyzerTab.value,
+      [],
       (data) => {
         if (data.type === 'progress' || data.type === 'step') {
           analysisProgress.value = data.message || data.content
@@ -564,6 +619,7 @@ const runAIAnalysis = async () => {
       },
       (data) => {
         if (data.type === 'final_html') {
+          analysisMeta.value = data.decision || null
           try {
             analysisResult.value = marked.parse(data.content)
           } catch(e) {

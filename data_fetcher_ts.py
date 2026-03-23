@@ -294,6 +294,64 @@ def fetch_daily_basic_ts(symbol: str, date: str = None) -> Optional[Dict[str, An
         return None
 
 
+def fetch_money_flow_ts(symbol: str, trade_date: str = None) -> Optional[Dict[str, Any]]:
+    """
+    Fetch stock money flow from Tushare moneyflow interface.
+
+    Returns amounts in 万元 to keep the rest of the app consistent.
+    """
+    pro = get_pro_client()
+    if pro is None:
+        return None
+
+    try:
+        ts_symbol = _format_symbol(symbol)
+        end_date = trade_date or datetime.now().strftime("%Y%m%d")
+        start_date = end_date
+        if not trade_date:
+            start_date = (datetime.now() - timedelta(days=10)).strftime("%Y%m%d")
+
+        fields = (
+            "ts_code,trade_date,buy_lg_amount,sell_lg_amount,"
+            "buy_elg_amount,sell_elg_amount,net_mf_amount"
+        )
+        df = pro.moneyflow(
+            ts_code=ts_symbol,
+            start_date=start_date,
+            end_date=end_date,
+            fields=fields,
+        )
+        if df is None or df.empty:
+            return None
+
+        df = df.sort_values("trade_date", ascending=False)
+        latest = df.iloc[0]
+
+        buy_lg_amount = float(latest.get("buy_lg_amount", 0) or 0)
+        sell_lg_amount = float(latest.get("sell_lg_amount", 0) or 0)
+        buy_elg_amount = float(latest.get("buy_elg_amount", 0) or 0)
+        sell_elg_amount = float(latest.get("sell_elg_amount", 0) or 0)
+        net_mf_amount = float(latest.get("net_mf_amount", 0) or 0)
+
+        main_buy = buy_lg_amount + buy_elg_amount
+        main_sell = sell_lg_amount + sell_elg_amount
+        main_total = main_buy + main_sell
+        net_pct_main = (net_mf_amount / main_total * 100) if main_total > 0 else 0.0
+
+        return {
+            "date": str(latest.get("trade_date", "")),
+            "net_amount_main": net_mf_amount,  # unit: 万元
+            "net_pct_main": round(net_pct_main, 2),
+            "net_amount_super": buy_elg_amount - sell_elg_amount,  # unit: 万元
+            "net_amount_large": buy_lg_amount - sell_lg_amount,  # unit: 万元
+            "status": "success",
+            "source": "tushare.moneyflow",
+        }
+    except Exception as e:
+        print(f"⚠️ Error fetching Tushare moneyflow for {symbol}: {e}")
+        return None
+
+
 def fetch_latest_daily_ts(symbol: str) -> Optional[Dict[str, Any]]:
     """
     Fetch the LATEST raw daily transaction data (unadjusted) from Tushare `daily` interface.

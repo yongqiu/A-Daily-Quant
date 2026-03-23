@@ -21,6 +21,7 @@ from data_fetcher_ts import fetch_stock_data_ts, fetch_daily_basic_ts
 from indicator_calc import calculate_indicators, get_latest_metrics
 from data_provider.base import DataFetcherManager
 from stock_scoring import get_score
+from dual_score import calculate_entry_score
 import json
 import os
 
@@ -395,6 +396,12 @@ def analyze_candidate(
             tech_data[key] = candidate[key]
             tech_data["__metadata__"][key] = candidate[key]
 
+    # 补充研究验证后的入场评分，用于候选筛选与排序。
+    entry_score, entry_breakdown, entry_reasons = calculate_entry_score(tech_data)
+    tech_data["entry_score"] = entry_score
+    tech_data["entry_score_breakdown"] = entry_breakdown
+    tech_data["entry_score_reasons"] = entry_reasons
+
     return tech_data
 
 
@@ -442,8 +449,17 @@ def print_detailed_metrics(metrics: Dict[str, Any]):
                 print(f"   [{cat}] " + ", ".join(line_items))
 
         print(
-            f"   [Result] Score: {metrics.get('composite_score')} | Rating: {metrics.get('rating')} | Suggestion: {metrics.get('operation_suggestion')}"
+            "   [Result] "
+            f"Entry Score: {metrics.get('entry_score')} | "
+            f"Legacy Score: {metrics.get('composite_score')} | "
+            f"Rating: {metrics.get('rating')} | "
+            f"Suggestion: {metrics.get('operation_suggestion')}"
         )
+
+        if "entry_score_reasons" in metrics and metrics["entry_score_reasons"]:
+            print("   [Entry Reasons]")
+            for detail in metrics["entry_score_reasons"]:
+                print(f"     * {detail}")
 
         if "score_breakdown" in metrics:
             print(
@@ -486,7 +502,9 @@ def run_deep_screen(
     if rules is None:
         rules = config.get("selection_rules", {})
 
-    min_score = rules.get("min_score", 70)
+    legacy_min_score = rules.get("min_score", 70)
+    entry_min_score = rules.get("entry_min_score", 75)
+    max_entry_volume_ratio = rules.get("entry_max_volume_ratio", 3.0)
 
     with ThreadPoolExecutor(max_workers=5) as executor:
         future_to_stock = {
@@ -501,24 +519,29 @@ def run_deep_screen(
                     continue
 
                 # --- 硬性规则 ---
-                # # 1. 价格高于 MA20（趋势为王）
-                # if metrics['close'] <= metrics['ma20']:
-                #     continue
+                # 1. 价格高于 MA20（趋势为王）
+                if metrics["close"] <= metrics["ma20"]:
+                    continue
 
-                # # 2. 综合评分
-                # if metrics['composite_score'] < min_score:
-                #     continue
+                # 2. 入场评分门槛
+                if metrics.get("entry_score", 0) < entry_min_score:
+                    continue
 
-                # # 量能形态：温和放量 (1.0 < V/MA5 < 2.0)
-                # # 注意：stock_scoring 中计算的 volume_ratio 实际上就是 V/MA5
-                # vr = metrics.get('volume_ratio', 0)
-                # if not (1.0 < vr < 2.0):
-                #     # print(f"  Condition Failed: Volume Ratio {vr} not in range (1.0, 2.0)")
-                #     continue
+                # 3. 极端爆量过滤：保留突破，剔除明显过热样本
+                vr = metrics.get("volume_ratio", 0) or 0
+                if vr > max_entry_volume_ratio:
+                    continue
+
+                # 4. 旧综合评分只保留为兜底参考，避免极低质量样本穿透
+                if metrics.get("composite_score", 0) < legacy_min_score:
+                    continue
 
                 final_candidates.append(metrics)
                 print(
-                    f"  ✨ Found: {stock['name']} (Score: {metrics['composite_score']})"
+                    "  ✨ Found: "
+                    f"{stock['name']} "
+                    f"(Entry Score: {metrics.get('entry_score')}, "
+                    f"Legacy Score: {metrics.get('composite_score')})"
                 )
 
                 # 根据请求记录详细原因
@@ -527,8 +550,11 @@ def run_deep_screen(
             except Exception as e:
                 print(f"  ❌ Error processing {stock['symbol']}: {e}")
 
-    # 按 综合评分 (Composite Score) 降序排序
-    final_candidates.sort(key=lambda x: x["composite_score"], reverse=True)
+    # 优先按入场评分排序，再用旧综合评分作为次排序键。
+    final_candidates.sort(
+        key=lambda x: (x.get("entry_score", 0), x.get("composite_score", 0)),
+        reverse=True,
+    )
 
     return final_candidates[: rules.get("max_final_candidates", 5)]
 

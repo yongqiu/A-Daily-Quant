@@ -527,6 +527,15 @@ def fetch_money_flow(symbol: str) -> Dict[str, Any]:
     返回包含流向数据的字典
     """
     try:
+        from data_fetcher_ts import fetch_money_flow_ts
+
+        ts_data = fetch_money_flow_ts(symbol)
+        if ts_data:
+            return ts_data
+    except Exception as e:
+        print(f"⚠️ Tushare moneyflow fallback trigger for {symbol}: {e}")
+
+    try:
         # 获取个股资金流向
         df = ak.stock_individual_fund_flow(stock=symbol, market="sh" if symbol.startswith("6") else "sz")
         
@@ -553,7 +562,8 @@ def fetch_money_flow(symbol: str) -> Dict[str, Any]:
             "net_pct_main": float(latest.get('主力净流入-净占比', 0)),
             "net_amount_super": float(latest.get('超大单净流入-净额', 0)) / 10000,
             "net_amount_large": float(latest.get('大单净流入-净额', 0)) / 10000,
-            "status": "success"
+            "status": "success",
+            "source": "akshare.stock_individual_fund_flow",
         }
     except Exception as e:
         print(f"⚠️ Error fetching money flow for {symbol}: {e}")

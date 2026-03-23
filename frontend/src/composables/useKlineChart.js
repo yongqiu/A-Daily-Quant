@@ -193,12 +193,6 @@ export function useKlineChart(containerRef, selectedSymbol) {
     }
   })
 
-  watch(selectedSymbol, (newSymbol) => {
-    if (newSymbol) {
-      loadKlineData(newSymbol)
-    }
-  }, { immediate: true })
-
   return {
     chart,
     loading,

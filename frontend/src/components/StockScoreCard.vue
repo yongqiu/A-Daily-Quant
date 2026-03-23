@@ -10,14 +10,14 @@
             :class="{ 'rotate-180': isExpanded }"
         />
         
-        <div class="text-2xl font-bold font-mono" :class="getScoreColor(metrics?.composite_score)">
-          {{ metrics?.composite_score }}<span class="text-sm font-normal text-text-tertiary ml-1">分</span>
+        <div class="text-2xl font-bold font-mono" :class="getScoreColor(primaryScoreValue)">
+          {{ primaryScoreValue ?? '--' }}<span class="text-sm font-normal text-text-tertiary ml-1">{{ primaryScoreLabel }}</span>
         </div>
         <div class="flex flex-col">
-          <span class="font-bold text-sm flex items-center gap-1" :class="getScoreColor(metrics?.composite_score)">
-            {{ metrics?.rating?.split(' ')[0] }}
+          <span class="font-bold text-sm flex items-center gap-1" :class="getScoreColor(primaryScoreValue)">
+            {{ primaryScoreTag }}
           </span>
-          <span class="text-[10px] tracking-widest text-text-tertiary opacity-80">{{ metrics?.rating?.split(' ').slice(1).join(' ') || '🟢🟢🟢' }}</span>
+          <span class="text-[10px] tracking-widest text-text-tertiary opacity-80">{{ secondaryHeaderText }}</span>
         </div>
         <span v-if="metrics?.score_mode_label"
               class="hidden sm:inline-flex px-2 py-1 rounded-full border border-primary/20 bg-primary/10 text-[10px] font-semibold tracking-wide text-primary">
@@ -38,7 +38,7 @@
       </div>
     </div>
 
-    <div v-if="metrics?.score_mode_note"
+        <div v-if="metrics?.score_mode_note"
          class="px-4 py-2 text-[11px] text-text-secondary border-b border-border-subtle bg-bg-elevated/20">
       {{ metrics?.score_mode_note }}
     </div>
@@ -67,6 +67,42 @@
 
       <!-- Right: Key Signals -->
       <div>
+        <div v-if="metrics?.entry_score || metrics?.holding_score" class="mb-5 p-3 rounded-lg border border-border-subtle bg-bg-elevated/40">
+          <h4 class="text-xs font-bold text-text-tertiary uppercase tracking-wider mb-3 flex items-center gap-1">
+            🎯 双评分
+          </h4>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div class="rounded-lg border border-border-subtle bg-bg-card/40 p-3">
+              <div class="text-[10px] uppercase tracking-wider text-text-tertiary mb-1">入场评分</div>
+              <div class="flex items-end gap-2">
+                <span class="text-xl font-bold font-mono" :class="getScoreColor(metrics?.entry_score)">{{ metrics?.entry_score ?? '--' }}</span>
+                <span class="text-xs text-text-secondary">分</span>
+              </div>
+              <div class="mt-2 text-[11px] text-text-secondary leading-relaxed">
+                {{ summarizeReasons(metrics?.entry_score_details, metrics?.entry_score, 'entry') || '用于候选筛选与排序' }}
+              </div>
+            </div>
+            <div class="rounded-lg border border-border-subtle bg-bg-card/40 p-3">
+              <div class="text-[10px] uppercase tracking-wider text-text-tertiary mb-1">持仓评分</div>
+              <div class="flex items-end gap-2">
+                <span class="text-xl font-bold font-mono" :class="getScoreColor(metrics?.holding_score)">{{ metrics?.holding_score ?? '--' }}</span>
+                <span class="text-xs text-text-secondary">分</span>
+                <span v-if="metrics?.holding_state_label" class="ml-auto text-[10px] px-2 py-0.5 rounded border border-border-subtle text-text-secondary">
+                  {{ metrics?.holding_state_label }}
+                </span>
+              </div>
+              <div class="mt-2 text-[11px] text-text-secondary leading-relaxed">
+                {{ summarizeReasons(metrics?.holding_score_details, metrics?.holding_score, 'holding') || '用于持仓状态判断' }}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div v-if="metrics?.composite_score && primaryScoreMode !== 'legacy'" class="mb-5 rounded-lg border border-border-subtle bg-bg-elevated/20 px-3 py-2 text-[11px] text-text-secondary">
+          旧评分参考：<span class="font-mono font-semibold" :class="getScoreColor(metrics?.composite_score)">{{ metrics?.composite_score }}</span>
+          <span v-if="metrics?.rating" class="ml-2">{{ metrics?.rating }}</span>
+        </div>
+
         <h4 class="text-xs font-bold text-text-tertiary uppercase tracking-wider mb-3 flex items-center gap-1">
           📈 核心技术信号
         </h4>
@@ -123,7 +159,7 @@
 </template>
 
 <script setup>
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import {
   ArrowPathIcon,
   ChevronDownIcon
@@ -145,6 +181,10 @@ const props = defineProps({
   defaultExpanded: {
       type: Boolean,
       default: false
+  },
+  primaryScoreMode: {
+      type: String,
+      default: 'legacy'
   }
 })
 
@@ -160,6 +200,35 @@ watch(() => props.defaultExpanded, (newVal) => {
 const toggleExpanded = () => {
     isExpanded.value = !isExpanded.value
 }
+
+const primaryScoreValue = computed(() => {
+    if (!props.metrics) return null
+    if (props.primaryScoreMode === 'entry') return props.metrics.entry_score ?? props.metrics.composite_score
+    if (props.primaryScoreMode === 'holding') return props.metrics.holding_score ?? props.metrics.composite_score
+    return props.metrics.composite_score
+})
+
+const primaryScoreLabel = computed(() => {
+    if (props.primaryScoreMode === 'entry') return '入场评分'
+    if (props.primaryScoreMode === 'holding') return '持仓评分'
+    return '旧评分'
+})
+
+const primaryScoreTag = computed(() => {
+    if (props.primaryScoreMode === 'entry') return '候选排序'
+    if (props.primaryScoreMode === 'holding') return props.metrics?.holding_state_label || '持仓状态'
+    return props.metrics?.rating?.split(' ')[0] || '原评分方式'
+})
+
+const secondaryHeaderText = computed(() => {
+    if (props.primaryScoreMode === 'entry') {
+        return summarizeReasons(props.metrics?.entry_score_details, props.metrics?.entry_score, 'entry') || (props.metrics?.rating || '原评分方式')
+    }
+    if (props.primaryScoreMode === 'holding') {
+        return summarizeReasons(props.metrics?.holding_score_details, props.metrics?.holding_score, 'holding') || (props.metrics?.rating || '原评分方式')
+    }
+    return props.metrics?.rating?.split(' ').slice(1).join(' ') || '🟢🟢🟢'
+})
 
 // Helpers
 const getScoreColor = (score) => {
@@ -190,6 +259,91 @@ const getRsiColor = (rsi) => {
     if (rsi > 70) return 'text-warning'
     if (rsi < 30) return 'text-success'
     return 'text-text-primary'
+}
+
+const NEGATIVE_REASON_KEYWORDS = [
+    '跌破',
+    '过大',
+    '过深',
+    '过热',
+    '爆量',
+    '下跌',
+    '转弱',
+    '失守',
+    '诱多',
+    '风险',
+    '偏离',
+    '承压',
+    '贴近布林上轨',
+]
+
+const POSITIVE_REASON_KEYWORDS = [
+    '站上',
+    '上方',
+    '未转空',
+    '未恶化',
+    '趋势延续',
+    '止损参考',
+    '支撑',
+    '适中',
+    '可承受',
+    '可容忍',
+    '正常整理',
+    '金叉',
+    '甜蜜区',
+]
+
+const isNegativeReason = (reason) => {
+    if (!reason) return false
+    return NEGATIVE_REASON_KEYWORDS.some(keyword => reason.includes(keyword))
+}
+
+const isPositiveReason = (reason) => {
+    if (!reason) return false
+    return POSITIVE_REASON_KEYWORDS.some(keyword => reason.includes(keyword))
+}
+
+const uniqueReasons = (reasons) => {
+    const seen = new Set()
+    return reasons.filter(reason => {
+        if (!reason || seen.has(reason)) return false
+        seen.add(reason)
+        return true
+    })
+}
+
+const summarizeReasons = (reasons, score, mode = 'entry') => {
+    if (!reasons || !Array.isArray(reasons) || reasons.length === 0) return ''
+
+    const normalized = uniqueReasons(reasons)
+    const negativeReasons = normalized.filter(isNegativeReason)
+    const positiveReasons = normalized.filter(isPositiveReason)
+    const neutralReasons = normalized.filter(reason => !isNegativeReason(reason) && !isPositiveReason(reason))
+
+    let selected = []
+
+    if ((score ?? 0) < 40) {
+        selected = [...negativeReasons, ...neutralReasons, ...positiveReasons].slice(0, 2)
+    } else if ((score ?? 0) < 60) {
+        const firstNegative = negativeReasons[0]
+        const firstPositive = positiveReasons[0] || neutralReasons[0]
+        selected = [firstNegative, firstPositive].filter(Boolean)
+        if (selected.length < 2) {
+            selected = [...selected, ...normalized.filter(reason => !selected.includes(reason))].slice(0, 2)
+        }
+    } else {
+        selected = [...positiveReasons, ...neutralReasons, ...negativeReasons].slice(0, 2)
+    }
+
+    if (mode === 'holding' && (score ?? 0) < 55 && negativeReasons.length === 0 && selected.length > 0) {
+        selected[0] = `偏弱但未破位: ${selected[0]}`
+    }
+
+    if (mode === 'entry' && (score ?? 0) < 40 && negativeReasons.length === 0 && selected.length > 0) {
+        selected[0] = `入场性价比不足: ${selected[0]}`
+    }
+
+    return selected.join(' / ')
 }
 
 </script>

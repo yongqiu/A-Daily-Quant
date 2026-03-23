@@ -8,6 +8,8 @@ from openai import OpenAI
 from typing import Dict, Any
 import os
 
+from analysis_snapshot import flatten_snapshot_for_legacy, get_machine_snapshot_lines
+
 try:
     from google import genai
     from google.genai import types
@@ -22,10 +24,69 @@ from data_fetcher import fetch_intraday_data, fetch_cyq_data
 from indicator_calc import analyze_intraday_pattern, process_cyq_data
 
 
+def _normalize_context_from_snapshot(context: Dict[str, Any]) -> Dict[str, Any]:
+    context = dict(context or {})
+    snapshot = context.get("snapshot")
+    if not snapshot:
+        return context
+
+    flattened = flatten_snapshot_for_legacy(snapshot)
+    raw_data = snapshot.get("raw_data", {})
+    context.setdefault("stock_info", snapshot.get("stock_info", {}))
+    context["tech_data"] = flattened
+    context.setdefault("realtime_data", raw_data.get("realtime_data", {}))
+    context.setdefault("market_context", raw_data.get("market_context", {}))
+    context.setdefault("extra_indicators", raw_data.get("extra_indicators", {}))
+    context.setdefault("extra", raw_data.get("extra_indicators", {}))
+    context.setdefault("intraday", raw_data.get("intraday", {}))
+    context.setdefault("machine_snapshot_lines", get_machine_snapshot_lines(snapshot))
+    context.setdefault("machine_snapshot_markdown", "\n".join(context["machine_snapshot_lines"]))
+    return context
+
+
+def _safe_float(value):
+    try:
+        if value in (None, "", "N/A", "None"):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _ensure_prompt_derived_fields(context: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Backfill template aliases so DB prompts can use stable names even when the
+    canonical source field lives elsewhere in the context.
+    """
+    tech_data = context.get("tech_data", {}) or {}
+    realtime_data = context.get("realtime_data", {}) or {}
+    extra = dict(context.get("extra_indicators") or context.get("extra") or {})
+
+    deviate_pct = _safe_float(extra.get("deviate_pct"))
+    if deviate_pct is None:
+        deviate_pct = _safe_float(tech_data.get("distance_from_ma20"))
+
+    if deviate_pct is None:
+        price = _safe_float(realtime_data.get("price"))
+        if price is None:
+            price = _safe_float(tech_data.get("close"))
+        ma20 = _safe_float(tech_data.get("ma20"))
+        if price is not None and ma20 not in (None, 0):
+            deviate_pct = (price - ma20) / ma20 * 100
+
+    if deviate_pct is not None:
+        extra["deviate_pct"] = round(deviate_pct, 2)
+
+    context["extra_indicators"] = extra
+    context["extra"] = extra
+    return context
+
+
 def get_prompt_from_db(slug: str, context: Dict[str, Any]) -> str:
     """
     Fetch prompt template from database and format with context using Jinja2
     """
+    context = _ensure_prompt_derived_fields(_normalize_context_from_snapshot(context))
     strategy = database.get_strategy_by_slug(slug)
     if not strategy or not strategy.get("template_content"):
         print(f"⚠️ Strategy {slug} not found in DB or empty. Fallback needed.")
@@ -82,7 +143,9 @@ def create_risk_prompt(context: Dict[str, Any], **kwargs) -> str:
     Create a strict RISK-FOCUSED prompt for existing HOLDINGS.
     NOW: Tries to load from DB 'stock_holding_risk', else fallback.
     """
+    context = _normalize_context_from_snapshot(context)
     stock_info = context.get("stock_info", {})
+    tech_data = context.get("tech_data", {})
     print(
         f"股票：{stock_info.get('symbol', 'N/A')} - {stock_info.get('name', 'N/A')} AI 分析（个股风控 - Strategy）"
     )
@@ -107,8 +170,24 @@ def create_risk_prompt(context: Dict[str, Any], **kwargs) -> str:
         return db_prompt
 
     # Fallback (Hardcoded)
-    prompt = f"""作为严格的A股风险控制官... (DB Fetch Failed)
-    请分析 {stock_info["symbol"]} ..."""
+    machine_snapshot = "\n".join(context.get("machine_snapshot_lines", []))
+    prompt = f"""# Machine Snapshot
+{machine_snapshot}
+
+# Raw Evidence
+- 当前价格: {tech_data.get("close", "N/A")}
+- MA20/MA60: {tech_data.get("ma20", "N/A")} / {tech_data.get("ma60", "N/A")}
+- RSI: {tech_data.get("rsi", "N/A")}
+- 量比: {tech_data.get("volume_ratio", "N/A")}
+
+# Task Contract
+你是严格的A股风险控制官。先判断是否同意机器评分，再说明原因，最后给出明确动作。
+输出必须包含：
+1. 对机器评分的态度（agree/partial/disagree）
+2. 关键证据
+3. 最终动作（BUY/HOLD/REDUCE/SELL/WAIT）
+4. 如要推翻机器结论，必须明确说明依据。
+"""
     return prompt
 
 
@@ -440,7 +519,7 @@ def create_realtime_etf_prompt(context: Dict[str, Any], **kwargs) -> str:
     # Fund Flow
     funds = realtime_data.get("money_flow", {})
     if funds and funds.get("status") == "success":
-        net_main = funds.get("net_amount_main", 0) / 10000
+        net_main = funds.get("net_amount_main", 0)
         fund_flow = f"主力净流入 {net_main:.0f}万"
     else:
         fund_flow = "暂无数据"
@@ -559,7 +638,7 @@ def create_agent_prompt(
     net_pct = funds.get("net_pct_main", 0)
 
     if funds.get("status") == "success" and net_main != 0:
-        net_main_val = float(net_main) / 10000.0
+        net_main_val = float(net_main)
         pct_abs = abs(float(net_pct))
         flow_dir = "流出" if net_main_val < 0 else "流入"
 
@@ -627,7 +706,7 @@ def create_agent_prompt(
         # 技术派：侧重均线、形态、资金流
         funds = realtime_data.get("money_flow", {})
         net_main = funds.get("net_amount_main", 0)
-        net_main_val = float(net_main) / 10000.0 if net_main else 0
+        net_main_val = float(net_main) if net_main else 0
         funds_str = (
             f"主力净流入：{net_main_val:.2f}万 (占比: {funds.get('net_pct_main', 0)}%)"
             if funds.get("status") == "success"
@@ -705,6 +784,7 @@ def create_agent_washout_prompt(context: Dict[str, Any], **kwargs) -> str:
     专注于发现"错杀"和"诱空"机会，分析量价背离、缩量下跌、关键支撑位测试等。
     优先从数据库加载 Jinja2 模板（slug='agent_washout_hunter'），兜底使用硬编码。
     """
+    context = _normalize_context_from_snapshot(context)
     from datetime import datetime
 
     stock_info = context.get("stock_info", {})
@@ -766,7 +846,7 @@ def create_agent_washout_prompt(context: Dict[str, Any], **kwargs) -> str:
     current_date = datetime.now().strftime("%Y-%m-%d")
     funds = realtime_data.get("money_flow", {})
     net_main = funds.get("net_amount_main", 0)
-    net_main_val = float(net_main) / 10000.0 if net_main else 0
+    net_main_val = float(net_main) if net_main else 0
 
     # 量比和换手率（判断缩量的关键）
     volume_ratio = tech_data.get(
@@ -788,7 +868,11 @@ def create_agent_washout_prompt(context: Dict[str, Any], **kwargs) -> str:
     )
     deviate_pct = (float(price) - ma20_val) / ma20_val * 100 if ma20_val > 0 else 0
 
-    prompt = f"""请你扮演【异动/洗盘分析师】（逆向思维专家）。
+    machine_snapshot = "\n".join(context.get("machine_snapshot_lines", []))
+    prompt = f"""# Machine Snapshot
+{machine_snapshot}
+
+请你扮演【异动/洗盘分析师】（逆向思维专家）。
 你的核心职责是：专门寻找"错杀"和"诱空"机会——当市场恐慌性抛售或主力刻意打压洗盘时，识别真正的买入良机。
 
 **分析对象**：{stock_info.get("name", "")} ({stock_info.get("symbol", "")}) [{stock_info.get("asset_type", "stock").upper()}]
@@ -833,7 +917,8 @@ def create_agent_washout_prompt(context: Dict[str, Any], **kwargs) -> str:
 1. 你的立场是"逆向思维"——即便资金流出，只要未放量跌破关键位，倾向于判定为洗盘。
 2. 观点必须鲜明，有理有据，不要试图平衡观点。
 3. 如果确认是真正的出货/破位，必须直接指出，不能强行看多。
-4. 输出格式为Markdown，不要包含寒暄。
+4. 先判断是否同意机器评分，再给出你的逆向观点。
+5. 最后必须输出一个 JSON 对象，字段为 stance、machine_score_judgement、key_evidence、risk_override、final_action。
 """
     return prompt
 
@@ -844,6 +929,7 @@ def create_agent_fundamentals_prompt(context: Dict[str, Any], **kwargs) -> str:
     通过市盈率、市净率、每股净资产、净资产收益率等指标判断股票基本面。
     优先从数据库加载 Jinja2 模板（slug='agent_fundamentals'），兜底使用硬编码。
     """
+    context = _normalize_context_from_snapshot(context)
     from datetime import datetime
 
     stock_info = context.get("stock_info", {})
@@ -894,7 +980,11 @@ def create_agent_fundamentals_prompt(context: Dict[str, Any], **kwargs) -> str:
     # 兜底硬编码
     current_date = datetime.now().strftime("%Y-%m-%d")
 
-    prompt = f"""请你扮演【基本面分析师】（价值投资研究员）。
+    machine_snapshot = "\n".join(context.get("machine_snapshot_lines", []))
+    prompt = f"""# Machine Snapshot
+{machine_snapshot}
+
+请你扮演【基本面分析师】（价值投资研究员）。
 你的核心职责是：通过财务指标和估值体系判断这只股票的基本面质量和投资价值。
 
 **分析对象**：{stock_info.get("name", "")} ({stock_info.get("symbol", "")}) [{stock_info.get("asset_type", "stock").upper()}]
@@ -932,7 +1022,8 @@ def create_agent_fundamentals_prompt(context: Dict[str, Any], **kwargs) -> str:
 1. 严格基于财务指标和估值体系分析，不要过多涉及技术面。
 2. 观点必须鲜明，有理有据，不要试图平衡观点。
 3. 如果基本面数据不足（N/A较多），直接指出数据缺失，不要凭空推测。
-4. 输出格式为Markdown，不要包含寒暄。
+4. 先判断是否同意机器评分。
+5. 最后必须输出一个 JSON 对象，字段为 stance、machine_score_judgement、key_evidence、risk_override、final_action。
 """
     return prompt
 
@@ -947,6 +1038,7 @@ def create_agent_cio_prompt(
     汇总各专家意见后进行综合裁决。
     优先从数据库加载 Jinja2 模板（slug='agent_cio'），兜底使用硬编码。
     """
+    context = _normalize_context_from_snapshot(context)
     from datetime import datetime
 
     stock_info = context.get("stock_info", {})
@@ -971,6 +1063,7 @@ def create_agent_cio_prompt(
 
     # 拼接各专家意见
     debate_summary = "\n".join(agent_results)
+    machine_snapshot = "\n".join(context.get("machine_snapshot_lines", []))
 
     # 获取策略属性以填充模板
     import database
@@ -1001,6 +1094,7 @@ def create_agent_cio_prompt(
             "role": role,
             "description": description,
             "context": context_str,
+            "machine_snapshot": machine_snapshot,
         },
     )
 
@@ -1008,12 +1102,20 @@ def create_agent_cio_prompt(
         return db_prompt
 
     # 兜底
-    prompt = f"""{common_header}
+    prompt = f"""# Machine Snapshot
+{machine_snapshot}
+
+{common_header}
 
 **专家团队辩论摘要**：
 {debate_summary}
 
 请根据以上信息，进行最终总结和决策。
+你必须显式判断：
+1. 最终动作
+2. 风险等级
+3. 共识强弱
+4. 机器评分是否需要被 override
 """
     return prompt
 
@@ -1085,6 +1187,7 @@ def create_agent_trend_follower_prompt(context: Dict[str, Any], **kwargs) -> str
     Create a TRENDFOLLOWER prompt for A-share stocks using 'deep_monitor' template.
     Now uses EXPLICIT market_context argument.
     """
+    context = _normalize_context_from_snapshot(context)
     tech_data = context.get("tech_data", {})
     realtime_data = context.get("realtime_data", {}) or {}
     extra_indicators = context.get("extra_indicators", {})
@@ -1140,7 +1243,21 @@ def create_agent_trend_follower_prompt(context: Dict[str, Any], **kwargs) -> str
     if db_prompt:
         return db_prompt
 
-    return "DB Error: agent_trend_follower prompt not found."
+    machine_snapshot = "\n".join(context.get("machine_snapshot_lines", []))
+    return f"""# Machine Snapshot
+{machine_snapshot}
+
+# Raw Evidence
+- 均线: MA5={tech_data.get("ma5")} MA20={tech_data.get("ma20")} MA60={tech_data.get("ma60")}
+- 均线排列: {tech_data.get("ma_arrangement", "未知")}
+- MACD: DIF={tech_data.get("macd_dif", "N/A")} DEA={tech_data.get("macd_dea", "N/A")}
+- RSI: {tech_data.get("rsi", "N/A")}
+- 量比: {tech_data.get("volume_ratio", "N/A")}
+
+# Task Contract
+你是趋势跟随者。先判断是否同意机器评分，只从趋势和延续性角度给结论。
+最后必须输出一个 JSON 对象，字段为 stance、machine_score_judgement、key_evidence、risk_override、final_action。
+"""
 
 
 def create_realtime_crypto_prompt(context: Dict[str, Any], **kwargs) -> str:
@@ -1218,6 +1335,7 @@ def create_analysis_prompt(
             - sector_info (dict): 板块信息 {'name', 'change_pct'}
             - sentiment (dict): 市场情绪 {'limit_up_count': int}
     """
+    context = _normalize_context_from_snapshot(context)
     stock_info = context.get("stock_info", {})
     asset_type = stock_info.get("asset_type", stock_info.get("type", "stock"))
     is_etf = asset_type == "etf"
@@ -1772,6 +1890,9 @@ def format_stock_section(
 
     # 评分详情
     score_breakdown = tech_data.get("score_breakdown", [])
+    entry_score = tech_data.get("entry_score")
+    holding_score = tech_data.get("holding_score")
+    holding_state_label = tech_data.get("holding_state_label", tech_data.get("holding_state"))
 
     score_section = ""
     if score_breakdown:
@@ -1794,6 +1915,15 @@ def format_stock_section(
 > {news_content}
 """
 
+    dual_score_block = ""
+    if entry_score is not None or holding_score is not None:
+        dual_score_block = (
+            "\n**🎯 双评分快照：**\n"
+            f"- Entry Score: **{entry_score if entry_score is not None else 'N/A'}**\n"
+            f"- Holding Score: **{holding_score if holding_score is not None else 'N/A'}**\n"
+            f"- Holding State: **{holding_state_label or 'N/A'}**\n"
+        )
+
     section = f"""
 ## {stock_info["symbol"]} - {stock_info["name"]}
 ### 📅 报告日期：{tech_data.get("date", "未知")}
@@ -1801,6 +1931,8 @@ def format_stock_section(
 ### 🚀 综合评分：{score}分 - {rating}
 
 **💡 策略建议：{operation_suggestion}**
+
+{dual_score_block}
 
 {score_section}
 

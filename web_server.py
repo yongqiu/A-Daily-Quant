@@ -22,7 +22,7 @@ import json
 import pandas as pd
 from collections import deque
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 
 # 清除代理环境以防止与 akshare 的连接问题
 for env_var in [
@@ -58,9 +58,18 @@ from data_fetcher_ts import fetch_stock_data_ts, fetch_daily_basic_ts
 from data_fetcher_tx import get_stock_realtime_tx
 from stock_scoring import get_score
 from contextlib import asynccontextmanager
+from analysis_snapshot import build_analysis_snapshot, build_snapshot_storage_view
+from scoring_pipeline import attach_scores_to_snapshot
 
 from llm_analyst import generate_analysis as base_generate_analysis
 from strategy_data_factory import StrategyDataFactory
+
+
+SCORE_SNAPSHOT_TTL_SECONDS = 15 * 60
+score_snapshot_cache = {
+    "date": datetime.now().strftime("%Y-%m-%d"),
+    "items": {},
+}
 
 
 def _run_generate_analysis(**kwargs):
@@ -123,6 +132,182 @@ market_state = {
 }
 
 
+def _get_asset_type_from_symbol(symbol: str, fallback: str = "stock") -> str:
+    if fallback and fallback != "stock":
+        return fallback
+    if symbol.startswith(("51", "56", "58", "159")):
+        return "etf"
+    return fallback or "stock"
+
+
+def _reset_score_snapshot_cache_if_needed():
+    today = datetime.now().strftime("%Y-%m-%d")
+    if score_snapshot_cache["date"] != today:
+        score_snapshot_cache["date"] = today
+        score_snapshot_cache["items"].clear()
+
+
+def _build_score_snapshot_cache_key(
+    symbol: str,
+    cost_price: float,
+    asset_type: str,
+    score_mode: str = "legacy",
+    trade_date: Optional[str] = None,
+) -> str:
+    return "|".join(
+        [
+            trade_date or datetime.now().strftime("%Y-%m-%d"),
+            score_mode,
+            symbol,
+            asset_type or "stock",
+            f"{float(cost_price or 0):.4f}",
+        ]
+    )
+
+
+def _get_cached_score_snapshot(cache_key: str) -> Optional[Dict[str, Any]]:
+    _reset_score_snapshot_cache_if_needed()
+    cached = score_snapshot_cache["items"].get(cache_key)
+    if not cached:
+        return None
+
+    age_seconds = (datetime.now() - cached["cached_at"]).total_seconds()
+    if age_seconds > SCORE_SNAPSHOT_TTL_SECONDS:
+        score_snapshot_cache["items"].pop(cache_key, None)
+        return None
+
+    return dict(cached["data"])
+
+
+def _set_cached_score_snapshot(cache_key: str, data: Dict[str, Any]):
+    _reset_score_snapshot_cache_if_needed()
+    score_snapshot_cache["items"][cache_key] = {
+        "cached_at": datetime.now(),
+        "data": dict(data),
+    }
+
+
+def _merge_score_fields(target: Dict[str, Any], metrics: Optional[Dict[str, Any]]):
+    if not metrics:
+        return
+
+    target["entry_score"] = metrics.get("entry_score")
+    target["holding_score"] = metrics.get("holding_score")
+    target["holding_state"] = metrics.get("holding_state")
+    target["holding_state_label"] = metrics.get("holding_state_label")
+    target["entry_score_details"] = metrics.get("entry_score_details", [])
+    target["holding_score_details"] = metrics.get("holding_score_details", [])
+    target["composite_score"] = metrics.get(
+        "composite_score", target.get("composite_score")
+    )
+    if metrics.get("rating"):
+        target["rating"] = metrics.get("rating")
+
+
+def _get_or_compute_score_snapshot(
+    symbol: str,
+    cost_price: float,
+    asset_type: str,
+    score_mode: str = "legacy",
+    trade_date: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    cache_key = _build_score_snapshot_cache_key(
+        symbol=symbol,
+        cost_price=cost_price,
+        asset_type=asset_type,
+        score_mode=score_mode,
+        trade_date=trade_date,
+    )
+    cached = _get_cached_score_snapshot(cache_key)
+    if cached:
+        return cached
+
+    metrics = get_score(
+        symbol,
+        cost_price=cost_price,
+        asset_type=asset_type,
+        include_news=False,
+        score_mode=score_mode,
+        trade_date=trade_date,
+    )
+    if metrics:
+        _set_cached_score_snapshot(cache_key, metrics)
+    return metrics
+
+
+def _attach_dual_scores_to_items(items: list, price_key: str = "price") -> list:
+    enriched = []
+    for item in items:
+        cloned = dict(item)
+        symbol = cloned.get("symbol")
+        if not symbol:
+            enriched.append(cloned)
+            continue
+
+        try:
+            if (
+                cloned.get("entry_score") is not None
+                or cloned.get("holding_score") is not None
+            ):
+                enriched.append(cloned)
+                continue
+
+            cost_price = float(cloned.get("cost_price") or 0)
+            asset_type = _get_asset_type_from_symbol(
+                symbol, cloned.get("asset_type") or cloned.get("type") or "stock"
+            )
+            metrics = _get_or_compute_score_snapshot(
+                symbol=symbol,
+                cost_price=cost_price,
+                asset_type=asset_type,
+                score_mode="legacy",
+            )
+            _merge_score_fields(cloned, metrics)
+        except Exception as e:
+            print(f"⚠️ attach dual scores failed for {symbol}: {e}")
+
+        enriched.append(cloned)
+    return enriched
+
+
+def _prefetch_daily_metrics_map(items: list, trade_date: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
+    symbols = [item.get("symbol") for item in items if item.get("symbol")]
+    if not symbols:
+        return {}
+
+    return database.get_daily_metrics_batch(
+        symbols, trade_date or datetime.now().strftime("%Y-%m-%d")
+    )
+
+
+def _attach_scores_from_metrics_map(items: list, metrics_map: Dict[str, Dict[str, Any]]) -> list:
+    enriched = []
+    for item in items:
+        cloned = dict(item)
+        _merge_score_fields(cloned, metrics_map.get(cloned.get("symbol")))
+        enriched.append(cloned)
+    return enriched
+
+
+def _attach_scores_from_db_only(items: list, trade_date: Optional[str] = None) -> list:
+    metrics_map = _prefetch_daily_metrics_map(
+        items, trade_date=trade_date or datetime.now().strftime("%Y-%m-%d")
+    )
+    return _attach_scores_from_metrics_map(items, metrics_map)
+
+
+def _sort_dashboard_items(items: list) -> list:
+    return sorted(
+        items,
+        key=lambda item: (
+            0 if item.get("type") == "holding" else 1,
+            -float(item.get("holding_score") or -1),
+            -float(item.get("entry_score") or -1),
+            -float(item.get("change_pct") or 0),
+        ),
+    )
+
+
 def _inject_star_state(stocks_list: list) -> list:
     """将数据库中的 is_starred 状态注入到实时 stocks 列表中。
     monitor_engine.run_check() 返回的数据不含 is_starred，
@@ -173,9 +358,10 @@ async def market_data_loop():
 
             # 2. 更新股票
             stocks_data = monitor_engine.run_check()
+            stocks_data = _attach_scores_from_db_only(stocks_data)
             # 合并收藏状态（run_check 不含 is_starred）
             _inject_star_state(stocks_data)
-            market_state["stocks"] = stocks_data
+            market_state["stocks"] = _sort_dashboard_items(stocks_data)
 
             market_state["last_update"] = datetime.now().strftime("%H:%M:%S")
             print(
@@ -205,7 +391,7 @@ async def get_status():
         # 从数据库持仓中获取静态股票信息
         holdings = database.get_all_holdings()
         if holdings:
-            market_state["stocks"] = [
+            base_items = [
                 {
                     "symbol": h["symbol"],
                     "name": h["name"],
@@ -221,6 +407,9 @@ async def get_status():
                 }
                 for h in holdings
             ]
+            market_state["stocks"] = _sort_dashboard_items(
+                _attach_scores_from_db_only(base_items)
+            )
     # 立即返回缓存状态（非阻塞）
     return market_state
 
@@ -303,7 +492,9 @@ def refresh_market_state_from_db():
                         "status": "等待监控开启",
                     }
                 )
-        market_state["stocks"] = new_stocks_list
+        market_state["stocks"] = _sort_dashboard_items(
+            _attach_scores_from_db_only(new_stocks_list)
+        )
     except Exception as e:
         print(f"Error refreshing market state: {e}")
 
@@ -380,6 +571,16 @@ async def get_selections(date: str = None):
 
     # 如果未提供日期，数据库层处理最新数据的检索
     selections = database.get_daily_selections(date)
+    selections = _attach_scores_from_db_only(
+        selections, trade_date=date or datetime.now().strftime("%Y-%m-%d")
+    )
+    selections.sort(
+        key=lambda item: (
+            -float(item.get("entry_score") or -1),
+            -float(item.get("composite_score") or -1),
+            -float(item.get("volume_ratio") or 0),
+        )
+    )
     print(f"📦 Found {len(selections)} selections")
 
     # 获取可用日期
@@ -420,9 +621,10 @@ async def refresh_realtime_data():
 
         # 2. 更新股票实时数据
         stocks_data = monitor_engine.run_check()
+        stocks_data = _attach_scores_from_db_only(stocks_data)
         # 合并收藏状态再覆盖（run_check 不含 is_starred）
         _inject_star_state(stocks_data)
-        market_state["stocks"] = stocks_data
+        market_state["stocks"] = _sort_dashboard_items(stocks_data)
 
         # 3. 更新时间戳
         market_state["last_update"] = datetime.now().strftime("%H:%M:%S")
@@ -755,21 +957,24 @@ async def calculate_stock_score(
             f"\n   --- DETAILED ANALYSIS: {latest.get('name', 'Unknown')} ({latest.get('symbol', '')}) ---"
         )
         print(f"   {latest}")
+        _set_cached_score_snapshot(
+            _build_score_snapshot_cache_key(
+                symbol=symbol,
+                cost_price=cost_price,
+                asset_type=asset_type,
+                score_mode=score_mode,
+                trade_date=trade_date,
+            ),
+            latest,
+        )
 
-        if score_mode != "legacy":
-            return {
-                "status": "success",
-                "message": "指标计算完成",
-                "data": latest,
-            }
-
-        # 3. 后处理：保存到 daily_metrics
-        today = datetime.now().strftime("%Y-%m-%d")
+        # 3. 后处理：统一保存到 daily_metrics，确保详情面板只读取手动计算产物
+        metric_date = trade_date or datetime.now().strftime("%Y-%m-%d")
 
         pattern_list = latest.get("pattern_details", [])
         latest["pattern_flags"] = ",".join(pattern_list) if pattern_list else ""
 
-        success = database.save_daily_metrics(today, latest)
+        success = database.save_daily_metrics(metric_date, latest)
 
         if success:
             return {
@@ -793,39 +998,20 @@ async def get_stock_metrics(
     date: str = None,
     score_mode: str = Query("legacy"),
 ):
-    """从数据库获取计算的指标评分"""
+    """从数据库获取已保存的指标评分，不在详情面板打开时触发重算。"""
+    today = datetime.now().strftime("%Y-%m-%d")
     if not date:
-        date = datetime.now().strftime("%Y-%m-%d")
-
-    if score_mode != "legacy":
-        holdings = database.get_all_holdings()
-        stock_info = next((h for h in holdings if h["symbol"] == symbol), None)
-        cost_price = float(stock_info.get("cost_price") or 0) if stock_info else 0.0
-        asset_type = stock_info.get("asset_type", "stock") if stock_info else "stock"
-
-        metrics = get_score(
-            symbol,
-            cost_price=cost_price,
-            asset_type=asset_type,
-            include_news=False,
-            score_mode=score_mode,
-            trade_date=date,
-        )
-        if metrics:
-            return {"status": "success", "data": metrics}
-        return {
-            "status": "not_found",
-            "message": "No metrics found for this date and score mode",
-        }
+        date = today
 
     metrics = database.get_daily_metrics(symbol, date)
     if metrics:
+        metrics["score_mode"] = score_mode or "legacy"
+        metrics["score_mode_label"] = (
+            "双评分模式" if score_mode and score_mode != "legacy" else "原评分方式"
+        )
         return {"status": "success", "data": metrics}
-    else:
-        # 如果今天未找到，尝试获取昨天的？或者直接返回未找到
-        # 为了更好的用户体验，也许检查是否有最近的指标？
-        # 但如果我们要显示当前状态，我们特别需要“今天的指标”。
-        return {"status": "not_found", "message": "No metrics found for this date"}
+
+    return {"status": "not_found", "message": "No metrics found for this date"}
 
 
 @app.get("/api/strategy/context-schema")
@@ -1042,6 +1228,9 @@ async def analyze_stock_report_stream(
                     data = json.loads(event_json)
                     if data["type"] == "final_html":
                         accumulated_html = data["content"]
+                        decision = data.get("decision", {})
+                        agent_outputs = data.get("agent_outputs", [])
+                        snapshot = context_payload.get("snapshot", {})
                         # Save to DB
                         try:
                             # 我们构建一个复合分析对象
@@ -1052,6 +1241,12 @@ async def analyze_stock_report_stream(
                                     "ma_arrangement", "MultiAgent"
                                 ),
                                 "composite_score": tech_data.get("composite_score", 0),
+                                "snapshot_version": snapshot.get("snapshot_version", 1),
+                                "analysis_snapshot": build_snapshot_storage_view(snapshot),
+                                "final_action": decision.get("final_action"),
+                                "risk_level": decision.get("risk_level"),
+                                "consensus_level": decision.get("consensus_level"),
+                                "agent_outputs": agent_outputs,
                                 "ai_analysis": accumulated_html,
                             }
                             # 确保价格有效
@@ -1172,6 +1367,8 @@ async def analyze_stock_report_stream(
                     "ma20": tech_data.get("ma20", 0),
                     "trend_signal": tech_data.get("ma_arrangement", ""),
                     "composite_score": tech_data.get("composite_score", 0),
+                    "snapshot_version": context_payload.get("snapshot", {}).get("snapshot_version", 1),
+                    "analysis_snapshot": build_snapshot_storage_view(context_payload.get("snapshot", {})),
                     "ai_analysis": formatted,
                 }
                 # Ensure price is valid
@@ -1583,15 +1780,9 @@ async def generate_single_stock_report(symbol: str, background_tasks: Background
         }
 
         try:
-            # 导入所需的主模块
-            from data_fetcher import fetch_data_dispatcher, calculate_start_date
-            from indicator_calc import calculate_indicators, get_latest_metrics
-
             generate_analysis = _run_generate_analysis
-            from monitor_engine import get_realtime_data
             import markdown
 
-            # 1. 从持仓中获取股票信息
             holdings = database.get_all_holdings()
             stock_info = next((h for h in holdings if h["symbol"] == symbol), None)
 
@@ -1603,59 +1794,17 @@ async def generate_single_stock_report(symbol: str, background_tasks: Background
                 }
                 return
 
-            # 2. 获取历史数据
-            start_date = calculate_start_date()
-            asset_type = stock_info.get("asset_type", "stock")
-            df = fetch_data_dispatcher(symbol, asset_type, start_date)
+            context_payload = StrategyDataFactory.build_full_strategy_context(
+                symbol=symbol,
+                context_type="holding",
+                monitor_engine=monitor_engine,
+            )
+            stock_info = context_payload.get("stock_info", stock_info)
+            latest = context_payload.get("tech_data", {})
+            realtime_data = context_payload.get("realtime_data", {})
+            snapshot = context_payload.get("snapshot", {})
 
-            if df is None or df.empty:
-                single_analysis_status[symbol] = {
-                    "status": "error",
-                    "message": f"无法获取 {symbol} 的历史数据",
-                    "result": "",
-                }
-                return
-
-            # 3. 计算指标
-            df = calculate_indicators(df)
-
-            # 4. 获取最新历史指标（基于昨日收盘价的技术指标）
-            latest = get_latest_metrics(df, stock_info.get("cost_price", 0))
-
-            # 5. 获取实时价格
-            realtime_dict = get_realtime_data([stock_info])
-            realtime_data = realtime_dict.get(symbol)
-
-            # 6. 如果可用，用实时价格更新最新数据
-            if realtime_data and realtime_data.get("price"):
-                print(
-                    f"📊 {symbol} - 历史收盘价: {latest.get('close')}, 实时价格: {realtime_data.get('price')}"
-                )
-                # 用实时价格覆盖收盘价
-                latest["close"] = round(realtime_data.get("price"), 3)
-                latest["realtime_price"] = round(realtime_data.get("price"), 3)
-                latest["change_pct_today"] = round(
-                    realtime_data.get("change_pct", 0), 2
-                )
-                # 因为有实时数据，将日期更新为今天
-                latest["date"] = datetime.now().strftime("%Y-%m-%d")
-
-                # 用实时价格重新计算盈亏
-                if stock_info.get("cost_price"):
-                    cost_price = stock_info["cost_price"]
-                    profit_loss_pct = (
-                        (latest["close"] - cost_price) / cost_price
-                    ) * 100
-                    latest["profit_loss_pct"] = round(profit_loss_pct, 2)
-            else:
-                print(
-                    f"⚠️ {symbol} - 无法获取实时价格，使用历史收盘价: {latest.get('close')}"
-                )
-
-            # 7. 加载 LLM 配置
             config = monitor_engine.load_config()
-
-            # 根据提供商动态解析 API 配置
             provider = config.get("api", {}).get("provider", "openai")
             llm_config = config.get(f"api_{provider}", config.get("llm_api", {}))
 
@@ -1667,19 +1816,12 @@ async def generate_single_stock_report(symbol: str, background_tasks: Background
                 }
                 return
 
-            context = {
-                "stock_info": stock_info,
-                "tech_data": latest,
-                "realtime_data": realtime_data,  # Use the previously extracted dictionary
-            }
-            # 8. 生成 AI 分析（使用包含实时价格的latest数据）
             analysis = generate_analysis(
-                context=context,
+                context=context_payload,
                 api_config=llm_config,
                 analysis_type="holding",
             )
 
-            # 9. 格式化结果
             from llm_analyst import format_stock_section
 
             formatted_report = format_stock_section(stock_info, latest, analysis)
@@ -1695,14 +1837,10 @@ async def generate_single_stock_report(symbol: str, background_tasks: Background
                 "ma20": latest.get("ma20", 0),
                 "trend_signal": latest.get("ma_arrangement", "未知"),
                 "composite_score": latest.get("composite_score", 0),
+                "snapshot_version": snapshot.get("snapshot_version", 1),
+                "analysis_snapshot": build_snapshot_storage_view(snapshot),
                 "ai_analysis": formatted_report,  # 保存完整的 markdown 报告
             }
-            # 确保价格有效 (latest['close'] 已经用 RT 价格更新（如果可用），但如果 RT 为 0，如果有需要则使用历史)
-            if analysis_data["price"] == 0 and latest.get("realtime_price", 0) == 0:
-                # 检查最新的原始收盘价是否非零 (来自历史)
-                # 'latest' 在上面已更新，所以如果需要检查原始收盘价，但 fetch 逻辑处理 0 跳过。
-                # 如果需要，这只是一个安全检查。
-                pass
 
             analysis_date = datetime.now().strftime("%Y-%m-%d")
 
@@ -1843,6 +1981,12 @@ async def get_analysis_history(
                         "ma20": result["ma20"],
                         "trend_signal": result["trend_signal"],
                         "composite_score": result["composite_score"],
+                        "snapshot_version": result.get("snapshot_version", 1),
+                        "analysis_snapshot": result.get("analysis_snapshot"),
+                        "final_action": result.get("final_action"),
+                        "risk_level": result.get("risk_level"),
+                        "consensus_level": result.get("consensus_level"),
+                        "agent_outputs": result.get("agent_outputs", []),
                         "ai_analysis": result["ai_analysis"],
                         "html": html_result,
                         "mode": mode,
@@ -1925,19 +2069,10 @@ async def analyze_candidate_stock(symbol: str, background_tasks: BackgroundTasks
         }
 
         try:
-            # Import main modules needed
-            from data_fetcher import (
-                fetch_data_dispatcher,
-                calculate_start_date,
-                fetch_stock_info,
-            )
-            from indicator_calc import calculate_indicators, get_latest_metrics
-
             generate_analysis = _run_generate_analysis
-            from monitor_engine import get_realtime_data
             import markdown
+            from data_fetcher import fetch_stock_info
 
-            # 1. 获取股票基本信息（从实时数据或搜索获取）
             stock_info_basic = fetch_stock_info(symbol)
 
             if not stock_info_basic:
@@ -1948,31 +2083,31 @@ async def analyze_candidate_stock(symbol: str, background_tasks: BackgroundTasks
                 }
                 return
 
-            stock_info = {
+            seed_stock_info = {
                 "symbol": symbol,
                 "name": stock_info_basic.get("name", symbol),
                 "asset_type": "stock",  # 候选股默认为stock
                 "cost_price": None,  # 候选股没有成本价
             }
+            StrategyDataFactory._set_to_cache(symbol, "stock_info", seed_stock_info)
 
-            # 2. Fetch historical data
-            start_date = calculate_start_date()
-            asset_type = stock_info.get("asset_type", "stock")
-            df = fetch_data_dispatcher(symbol, asset_type, start_date)
+            context_payload = StrategyDataFactory.build_full_strategy_context(
+                symbol=symbol,
+                context_type="candidate",
+                monitor_engine=monitor_engine,
+            )
+            stock_info = context_payload.get("stock_info", seed_stock_info)
+            latest = context_payload.get("tech_data", {})
+            realtime_data = context_payload.get("realtime_data", {})
+            snapshot = context_payload.get("snapshot", {})
 
-            if df is None or df.empty:
+            if not latest:
                 candidate_analysis_status[symbol] = {
                     "status": "error",
-                    "message": f"无法获取 {symbol} 的历史数据",
+                    "message": f"无法获取 {symbol} 的统一分析快照",
                     "result": "",
                 }
                 return
-
-            # 3. Calculate indicators
-            df = calculate_indicators(df)
-
-            # 4. 获取最新历史指标（基于昨日收盘价的技术指标）
-            latest = get_latest_metrics(df, cost_price=None)
 
             # --- 4.5 尝试从 daily_selections 恢复元数据 (排名，情绪等) ---
             from database import get_daily_selection
@@ -1997,12 +2132,10 @@ async def analyze_candidate_stock(symbol: str, background_tasks: BackgroundTasks
                         # 合并到最新指标
                         for k, v in metadata.items():
                             latest[k] = v
+                            if realtime_data is not None and k not in realtime_data:
+                                realtime_data[k] = v
                     except Exception as meta_e:
                         print(f"⚠️ Failed to parse metadata: {meta_e}")
-
-            # 5. 获取实时价格
-            realtime_dict = get_realtime_data([stock_info])
-            realtime_data = realtime_dict.get(symbol)
 
             # --- 5.1 注入板块数据（修复候选提示中缺失的数据） ---
             try:
@@ -2029,6 +2162,19 @@ async def analyze_candidate_stock(symbol: str, background_tasks: BackgroundTasks
             except Exception as sec_e:
                 print(f"⚠️ Sector fetch failed for {symbol}: {sec_e}")
 
+            context_payload["realtime_data"] = realtime_data
+            context_payload["tech_data"] = latest
+            context_payload["snapshot"] = attach_scores_to_snapshot(
+                build_analysis_snapshot(
+                    stock_info=stock_info,
+                    metrics=latest,
+                    realtime_data=realtime_data,
+                    market_context=context_payload.get("market_context", {}),
+                    extra_indicators=context_payload.get("extra_indicators", {}),
+                    intraday=context_payload.get("intraday", {}),
+                )
+            )
+
             # 6. Update latest with realtime price if available
             if realtime_data and realtime_data.get("price"):
                 print(
@@ -2046,6 +2192,17 @@ async def analyze_candidate_stock(symbol: str, background_tasks: BackgroundTasks
                     f"⚠️ {symbol} - 无法获取实时价格，使用历史收盘价: {latest.get('close')}"
                 )
 
+            context_payload["snapshot"] = attach_scores_to_snapshot(
+                build_analysis_snapshot(
+                    stock_info=stock_info,
+                    metrics=latest,
+                    realtime_data=realtime_data,
+                    market_context=context_payload.get("market_context", {}),
+                    extra_indicators=context_payload.get("extra_indicators", {}),
+                    intraday=context_payload.get("intraday", {}),
+                )
+            )
+
             # 7. Load LLM config
             config = monitor_engine.load_config()
 
@@ -2061,14 +2218,9 @@ async def analyze_candidate_stock(symbol: str, background_tasks: BackgroundTasks
                 }
                 return
 
-            context = {
-                "stock_info": stock_info,
-                "tech_data": latest,
-                "realtime_data": realtime_data,
-            }
             # 8. 生成 AI 分析（使用候选股策略 - analysis_type="candidate")
             analysis = generate_analysis(
-                context=context,
+                context=context_payload,
                 api_config=llm_config,
                 analysis_type="candidate",  # 🔥 使用选股策略
             )

@@ -117,11 +117,16 @@
 
                     <div class="flex justify-between items-center text-xs text-text-tertiary mt-1">
                         <div class="flex items-center gap-2">
-                            <!-- Score -->
-                            <span v-if="stock.composite_score" class="font-mono font-bold" :class="getScoreColor(stock.composite_score)">
+                            <span v-if="stock.holding_score" class="font-mono font-bold" :class="getScoreColor(stock.holding_score)">
+                                H{{ stock.holding_score }}
+                            </span>
+                            <span v-if="stock.holding_state_label" class="text-[10px] px-1.5 py-[1px] rounded border border-border-subtle text-text-secondary">
+                                {{ stock.holding_state_label }}
+                            </span>
+                            <span v-else-if="stock.composite_score" class="font-mono font-bold" :class="getScoreColor(stock.composite_score)">
                                 {{ stock.composite_score }}分
                             </span>
-                             <span v-else class="text-text-tertiary opacity-50 text-[10px]">-</span>
+                            <span v-else class="text-text-tertiary opacity-50 text-[10px]">-</span>
                         </div>
                         
                         <!-- Profit % -->
@@ -153,9 +158,11 @@
                         <div class="flex justify-between items-center text-xs">
                            <div class="flex flex-col gap-0.5 text-text-tertiary">
                                <span>
-                                   <span v-if="stock.composite_score" class="font-bold mr-2" :class="getScoreColor(stock.composite_score)">{{ stock.composite_score }}分</span>
+                                   <span v-if="stock.holding_score" class="font-bold mr-2" :class="getScoreColor(stock.holding_score)">H{{ stock.holding_score }}</span>
+                                   <span v-else-if="stock.composite_score" class="font-bold mr-2" :class="getScoreColor(stock.composite_score)">{{ stock.composite_score }}分</span>
                                    成本: {{ stock.cost_price > 0 ? stock.cost_price.toFixed(2) : '--' }}
                                </span>
+                               <span v-if="stock.holding_state_label" class="text-[10px] text-text-secondary">{{ stock.holding_state_label }}</span>
                                <span v-if="stock.cost_price > 0 && stock.price" class="font-mono" :class="((stock.price - stock.cost_price)/stock.cost_price) >= 0 ? 'text-up' : 'text-down'">
                                    盈亏: {{ (((stock.price - stock.cost_price)/stock.cost_price)*100).toFixed(2) }}%
                                </span>
@@ -226,7 +233,10 @@
                          
                          <!-- Score -->
                          <div class="w-16 text-right pr-2">
-                             <span v-if="stock.composite_score" class="font-mono font-bold text-lg" :class="getScoreColor(stock.composite_score)">
+                             <span v-if="stock.holding_score" class="font-mono font-bold text-lg" :class="getScoreColor(stock.holding_score)">
+                                 {{ stock.holding_score }}
+                             </span>
+                             <span v-else-if="stock.composite_score" class="font-mono font-bold text-lg" :class="getScoreColor(stock.composite_score)">
                                  {{ stock.composite_score }}
                              </span>
                              <span v-else class="text-text-tertiary text-sm">--</span>
@@ -375,6 +385,7 @@
                  :metrics="scoreResult"
                  :loading="calculatingScore"
                  :default-expanded="isScoreExpanded"
+                 primary-score-mode="holding"
                  @refresh="runScoreCalculation"
              />
 
@@ -472,6 +483,45 @@
 
                  <!-- Analysis Result -->
                  <div v-else-if="analysisResult || tradingPlan" class="flex-1 pb-5">
+                   <div v-if="analysisMeta" class="mb-4 rounded-xl border border-border-subtle bg-bg-elevated/40 p-4">
+                     <div class="mb-3 text-[11px] font-semibold uppercase tracking-[0.2em] text-text-tertiary">决策摘要</div>
+                     <div class="grid gap-3 sm:grid-cols-3">
+                       <div class="rounded-lg border border-border-subtle bg-bg/50 px-3 py-2">
+                         <div class="text-[11px] text-text-tertiary">最终动作</div>
+                         <div class="mt-1 text-sm font-semibold text-text-primary">{{ analysisMeta.final_action || '--' }}</div>
+                       </div>
+                       <div class="rounded-lg border border-border-subtle bg-bg/50 px-3 py-2">
+                         <div class="text-[11px] text-text-tertiary">风险等级</div>
+                         <div class="mt-1 text-sm font-semibold text-text-primary">{{ analysisMeta.risk_level || analysisMeta.consensus_level || '--' }}</div>
+                       </div>
+                       <div class="rounded-lg border border-border-subtle bg-bg/50 px-3 py-2">
+                         <div class="text-[11px] text-text-tertiary">共识强度</div>
+                         <div class="mt-1 text-sm font-semibold text-text-primary">{{ analysisMeta.consensus_level || '--' }}</div>
+                       </div>
+                     </div>
+                   </div>
+                   <div v-if="analysisMeta?.agent_outputs?.length" class="mb-4 rounded-xl border border-border-subtle bg-bg-elevated/30 p-4">
+                     <div class="mb-3 text-[11px] font-semibold uppercase tracking-[0.2em] text-text-tertiary">专家结构化意见</div>
+                     <div class="space-y-3">
+                       <div v-for="agent in analysisMeta.agent_outputs" :key="agent.agent_slug || agent.agent_name" class="rounded-lg border border-border-subtle bg-bg/50 p-3">
+                         <div class="flex items-center justify-between gap-3">
+                           <div class="text-sm font-semibold text-text-primary">{{ agent.agent_name || agent.agent_slug || 'Agent' }}</div>
+                           <div class="text-[11px] text-text-secondary">
+                             <span class="mr-3">态度: {{ agent.structured?.stance || '--' }}</span>
+                             <span>动作: {{ agent.structured?.final_action || '--' }}</span>
+                           </div>
+                         </div>
+                         <div v-if="agent.structured?.machine_score_judgement" class="mt-2 text-xs text-text-secondary">
+                           {{ agent.structured.machine_score_judgement }}
+                         </div>
+                         <div v-if="agent.structured?.key_evidence?.length" class="mt-2 flex flex-wrap gap-2">
+                           <span v-for="(evidence, idx) in agent.structured.key_evidence" :key="idx" class="rounded-full border border-border-subtle bg-bg-elevated px-2 py-1 text-[11px] text-text-secondary">
+                             {{ evidence }}
+                           </span>
+                         </div>
+                       </div>
+                     </div>
+                   </div>
                    <TradingPlanCard v-if="tradingPlan" :plan="tradingPlan" />
                    <div class="prose max-w-none" v-html="analysisResult"></div>
                  </div>
@@ -524,8 +574,11 @@ const marketStore = useMarketStore()
 const SCORE_MODE_STORAGE_KEY = 'stock-score-mode'
 const scoreModeOptions = [
   { label: '原评分方式', value: 'legacy' },
-  { label: 'Alpha158 + LightGBM', value: 'alpha158_lightgbm' },
 ]
+
+const normalizeScoreMode = (mode) => {
+  return scoreModeOptions.some(option => option.value === mode) ? mode : 'legacy'
+}
 
 // State
 const selectedStockSymbol = ref(null)
@@ -535,9 +588,10 @@ const analyzing = ref(false)
 const calculatingScore = ref(false)
 const scoreResult = ref(null) // Stores the metrics result
 const isScoreExpanded = ref(false)
-const selectedScoreMode = ref(localStorage.getItem(SCORE_MODE_STORAGE_KEY) || 'legacy')
+const selectedScoreMode = ref(normalizeScoreMode(localStorage.getItem(SCORE_MODE_STORAGE_KEY)))
 const analysisProgress = ref('')
 const analysisResult = ref('')
+const analysisMeta = ref(null)
 const tradingPlan = ref(null)
 const showAddHoldingModal = ref(false)
 const showEditHoldingModal = ref(false)
@@ -598,6 +652,7 @@ const selectStock = (stock) => {
 const processAnalysisContent = (markdownText) => {
     if (!markdownText) {
         analysisResult.value = ''
+        analysisMeta.value = null
         tradingPlan.value = null
         return
     }
@@ -689,9 +744,11 @@ const loadAnalysisHistory = async () => {
 
     loadingAnalysis.value = true
     analysisResult.value = ''
+    analysisMeta.value = null
     try {
         const response = await apiMethods.getAnalysisHistory(selectedStockSymbol.value, selectedAnalysisDate.value, activeAnalyzerTab.value)
          if (response.status === 'success') {
+          analysisMeta.value = response.data || null
           // Prefer raw markdown 'ai_analysis' for processing, fallback to 'html' if missing
           const rawContent = response.data?.ai_analysis || ''
           if (rawContent) {
@@ -707,6 +764,7 @@ const loadAnalysisHistory = async () => {
     } catch (error) {
         console.error('History load failed:', error)
          analysisResult.value = `<div class="p-4 text-center text-danger">加载失败: ${error.message}</div>`
+         analysisMeta.value = null
          tradingPlan.value = null
     } finally {
         loadingAnalysis.value = false
@@ -719,11 +777,13 @@ const loadLatestAnalysis = async (symbol) => {
 
   loadingAnalysis.value = true
   analysisResult.value = ''
+  analysisMeta.value = null
 
   try {
     const response = await apiMethods.getLatestAnalysis(symbol, activeAnalyzerTab.value)
 
     if (response.status === 'success') {
+      analysisMeta.value = response.data || null
       // Prefer raw markdown
       const rawContent = response.data?.ai_analysis || ''
       if (rawContent) {
@@ -735,14 +795,17 @@ const loadLatestAnalysis = async (symbol) => {
     } else if (response.status === 'no_data') {
       // No analysis available yet, keep empty
       analysisResult.value = ''
+      analysisMeta.value = null
       tradingPlan.value = null
     } else if (response.status === 'not_found') {
       analysisResult.value = ''
+      analysisMeta.value = null
       tradingPlan.value = null
     }
   } catch (error) {
     console.error('Failed to load latest analysis:', error)
     analysisResult.value = ''
+    analysisMeta.value = null
     tradingPlan.value = null
   } finally {
     loadingAnalysis.value = false
@@ -778,7 +841,7 @@ const loadStockMetrics = async (symbol, date) => {
 
 const handleRefresh = async () => {
     await marketStore.refreshRealtime()
-    if(selectedStockSymbol.value) {
+    if(selectedStockSymbol.value && showKlineChart.value) {
         // Reload chart data
         loadKlineData(selectedStockSymbol.value)
     }
@@ -816,6 +879,7 @@ const runAIAnalysis = async () => {
   analysisProgress.value = 'Initializing'
   // Don't clear result immediately if we want to show loading overlay, but usually better UX to clear or dim
   analysisResult.value = ''
+  analysisMeta.value = null
   tradingPlan.value = null
   let accumulatedMarkdown = ''
 
@@ -827,10 +891,13 @@ const runAIAnalysis = async () => {
           accumulatedMarkdown += data.content
           // Progressive rendering: try to parse markdown, but don't try to parse JSON yet (it might be incomplete)
           analysisResult.value = marked.parse(accumulatedMarkdown)
+        } else if (data.type === 'final_html') {
+          analysisMeta.value = data.decision || null
         }
     }
     const onComplete = (data) => {
         if (data.type === 'final_html') {
+          analysisMeta.value = data.decision || null
           // data.content is HTML. If we have been progressively updating via 'token', we already have raw markdown.
           // Getting raw markdown from 'final_html' is impossible.
           // However, streaming usually sends 'result' (Markdown) OR 'token'.

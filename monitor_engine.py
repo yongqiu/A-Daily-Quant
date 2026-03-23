@@ -602,6 +602,10 @@ class MonitorEngine:
             # Get metrics if available
             metrics = daily_metrics_map.get(symbol, {})
             composite_score = metrics.get("composite_score")
+            entry_score = metrics.get("entry_score")
+            holding_score = metrics.get("holding_score")
+            holding_state = metrics.get("holding_state")
+            holding_state_label = metrics.get("holding_state_label")
 
             if data:
                 check_res = check_strategy(data)
@@ -623,8 +627,12 @@ class MonitorEngine:
                     "ai_analysis": self.ai_cache.get(
                         symbol, None
                     ),  # Attach cached AI result
-                    # New field for score
+                    # Score fields
                     "composite_score": composite_score,
+                    "entry_score": entry_score,
+                    "holding_score": holding_score,
+                    "holding_state": holding_state,
+                    "holding_state_label": holding_state_label,
                 }
                 results.append(item)
             else:
@@ -644,7 +652,11 @@ class MonitorEngine:
                         "price": 0,
                         "change_pct": 0,
                         "volume_ratio": 0,
-                        "composite_score": metrics.get("composite_score"),
+                        "composite_score": composite_score,
+                        "entry_score": entry_score,
+                        "holding_score": holding_score,
+                        "holding_state": holding_state,
+                        "holding_state_label": holding_state_label,
                     }
                 )
 
@@ -656,6 +668,9 @@ class MonitorEngine:
             key=lambda x: (
                 0 if x["status"] == "warning" else 1,  # Warning first
                 0 if x["type"] == "holding" else 1,  # Holdings next
+                -float(x.get("holding_score") or -1)
+                if x["type"] == "holding"
+                else -float(x.get("entry_score") or -1),
                 -x["change_pct"],  # High gainers next
             )
         )
