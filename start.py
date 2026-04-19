@@ -111,7 +111,7 @@ def setup_config():
         "analysis": {"lookback_days": 365, "ma_short": 20, "ma_long": 60},
         "selection_rules": {
             "enabled": True,
-            "min_score": 70,
+            "entry_min_score": 75,
             "max_final_candidates": 5,
         },
     }
@@ -150,8 +150,13 @@ def start_server():
     print("🚀 [5/5] 正在启动后台服务，请不要关闭终端...")
     os.environ["DB_TYPE"] = "sqlite"
 
-    port = 8100
-    url = f"http://127.0.0.1:{port}"
+    host = os.getenv("APP_HOST", "127.0.0.1")
+    port = int(os.getenv("APP_PORT", "8100"))
+    probe_host = os.getenv("APP_PROBE_HOST", "127.0.0.1")
+    public_host = os.getenv("APP_PUBLIC_HOST", probe_host if host == "0.0.0.0" else host)
+    url = f"http://{public_host}:{port}"
+    probe_url = f"http://{probe_host}:{port}"
+    should_open_browser = os.getenv("APP_OPEN_BROWSER", "true").lower() == "true"
 
     try:
         # 使用 subprocess 拉起 web_server
@@ -161,9 +166,10 @@ def start_server():
         max_retries = 30
         for _ in range(max_retries):
             try:
-                urllib.request.urlopen(f"{url}/api/config")
+                urllib.request.urlopen(f"{probe_url}/api/config")
                 print(f"\n🎉 启动成功！控制面板运行于: {url}")
-                webbrowser.open(url)
+                if should_open_browser:
+                    webbrowser.open(url)
                 break
             except Exception:
                 time.sleep(0.5)

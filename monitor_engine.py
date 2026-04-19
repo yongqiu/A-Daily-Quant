@@ -25,7 +25,6 @@ from data_fetcher import (
 )
 from indicator_calc import calculate_indicators, get_latest_metrics
 from llm_analyst import generate_analysis
-from etf_score import apply_etf_score
 from data_fetcher_ts import fetch_index_daily_ts, fetch_daily_basic_ts
 import database
 
@@ -601,7 +600,6 @@ class MonitorEngine:
 
             # Get metrics if available
             metrics = daily_metrics_map.get(symbol, {})
-            composite_score = metrics.get("composite_score")
             entry_score = metrics.get("entry_score")
             holding_score = metrics.get("holding_score")
             holding_state = metrics.get("holding_state")
@@ -628,7 +626,6 @@ class MonitorEngine:
                         symbol, None
                     ),  # Attach cached AI result
                     # Score fields
-                    "composite_score": composite_score,
                     "entry_score": entry_score,
                     "holding_score": holding_score,
                     "holding_state": holding_state,
@@ -652,7 +649,6 @@ class MonitorEngine:
                         "price": 0,
                         "change_pct": 0,
                         "volume_ratio": 0,
-                        "composite_score": composite_score,
                         "entry_score": entry_score,
                         "holding_score": holding_score,
                         "holding_state": holding_state,

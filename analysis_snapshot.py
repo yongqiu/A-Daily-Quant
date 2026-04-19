@@ -15,10 +15,9 @@ def _safe_list(value: Any) -> List[Any]:
 
 
 def build_decision_hints(metrics: Dict[str, Any], scores: Dict[str, Any]) -> Dict[str, Any]:
-    dual = scores.get("dual", {})
-    entry_score = dual.get("entry_score", 0) or 0
-    holding_score = dual.get("holding_score", 0) or 0
-    holding_state = dual.get("holding_state", "")
+    entry_score = scores.get("entry_score", 0) or 0
+    holding_score = scores.get("holding_score", 0) or 0
+    holding_state = scores.get("holding_state", "")
 
     risk_flags: List[str] = []
     conflicts: List[str] = []
@@ -97,27 +96,25 @@ def build_analysis_snapshot(
 
 def get_machine_snapshot_lines(snapshot: Dict[str, Any]) -> List[str]:
     metrics = snapshot.get("metrics", {})
-    legacy = snapshot.get("scores", {}).get("legacy", {})
-    dual = snapshot.get("scores", {}).get("dual", {})
+    scores = snapshot.get("scores", {})
     hints = snapshot.get("decision_hints", {})
 
     lines = [
-        f"- Legacy 综合评分: {legacy.get('composite_score', 'N/A')} ({legacy.get('rating', 'N/A')})",
-        f"- Entry Score: {dual.get('entry_score', 'N/A')}",
-        f"- Holding Score: {dual.get('holding_score', 'N/A')}",
-        f"- Holding State: {dual.get('holding_state_label', dual.get('holding_state', 'N/A'))}",
+        f"- Entry Score: {scores.get('entry_score', 'N/A')}",
+        f"- Holding Score: {scores.get('holding_score', 'N/A')}",
+        f"- Holding State: {scores.get('holding_state_label', scores.get('holding_state', 'N/A'))}",
         f"- Machine Bias: {hints.get('machine_bias', 'neutral')}",
         f"- Primary Mode: {hints.get('primary_mode', 'entry')}",
     ]
 
-    if dual.get("entry_score_details"):
+    if scores.get("entry_score_details"):
         lines.append(
-            "- Entry 理由: " + "；".join(_safe_list(dual.get("entry_score_details"))[:4])
+            "- Entry 理由: " + "；".join(_safe_list(scores.get("entry_score_details"))[:4])
         )
-    if dual.get("holding_score_details"):
+    if scores.get("holding_score_details"):
         lines.append(
             "- Holding 理由: "
-            + "；".join(_safe_list(dual.get("holding_score_details"))[:4])
+            + "；".join(_safe_list(scores.get("holding_score_details"))[:4])
         )
     if hints.get("risk_flags"):
         lines.append("- 风险标记: " + "、".join(_safe_list(hints.get("risk_flags"))))
@@ -135,43 +132,32 @@ def get_machine_snapshot_lines(snapshot: Dict[str, Any]) -> List[str]:
     return lines
 
 
-def flatten_snapshot_for_legacy(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+def flatten_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     stock_info = snapshot.get("stock_info", {})
     metrics = deepcopy(snapshot.get("metrics", {}))
-    legacy = snapshot.get("scores", {}).get("legacy", {})
-    dual = snapshot.get("scores", {}).get("dual", {})
+    scores = snapshot.get("scores", {})
     hints = snapshot.get("decision_hints", {})
 
     metrics["symbol"] = stock_info.get("symbol", snapshot.get("symbol"))
     metrics["name"] = stock_info.get("name", metrics.get("name"))
     metrics["snapshot_version"] = snapshot.get("snapshot_version", SNAPSHOT_VERSION)
     metrics["analysis_snapshot"] = snapshot
-    metrics["composite_score"] = legacy.get(
-        "composite_score", metrics.get("composite_score")
-    )
-    metrics["rating"] = legacy.get("rating", metrics.get("rating"))
-    metrics["score_breakdown"] = legacy.get(
-        "score_breakdown", metrics.get("score_breakdown", [])
-    )
-    metrics["score_details"] = legacy.get(
-        "score_details", metrics.get("score_details", [])
-    )
-    metrics["entry_score"] = dual.get("entry_score", metrics.get("entry_score"))
-    metrics["entry_score_breakdown"] = dual.get(
+    metrics["entry_score"] = scores.get("entry_score", metrics.get("entry_score"))
+    metrics["entry_score_breakdown"] = scores.get(
         "entry_score_breakdown", metrics.get("entry_score_breakdown", [])
     )
-    metrics["entry_score_details"] = dual.get(
+    metrics["entry_score_details"] = scores.get(
         "entry_score_details", metrics.get("entry_score_details", [])
     )
-    metrics["holding_score"] = dual.get("holding_score", metrics.get("holding_score"))
-    metrics["holding_score_breakdown"] = dual.get(
+    metrics["holding_score"] = scores.get("holding_score", metrics.get("holding_score"))
+    metrics["holding_score_breakdown"] = scores.get(
         "holding_score_breakdown", metrics.get("holding_score_breakdown", [])
     )
-    metrics["holding_score_details"] = dual.get(
+    metrics["holding_score_details"] = scores.get(
         "holding_score_details", metrics.get("holding_score_details", [])
     )
-    metrics["holding_state"] = dual.get("holding_state", metrics.get("holding_state"))
-    metrics["holding_state_label"] = dual.get(
+    metrics["holding_state"] = scores.get("holding_state", metrics.get("holding_state"))
+    metrics["holding_state_label"] = scores.get(
         "holding_state_label", metrics.get("holding_state_label")
     )
     metrics["machine_bias"] = hints.get("machine_bias", "neutral")
@@ -182,8 +168,7 @@ def flatten_snapshot_for_legacy(snapshot: Dict[str, Any]) -> Dict[str, Any]:
 
 def build_snapshot_storage_view(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     metrics = snapshot.get("metrics", {})
-    legacy = snapshot.get("scores", {}).get("legacy", {})
-    dual = snapshot.get("scores", {}).get("dual", {})
+    scores = snapshot.get("scores", {})
     hints = snapshot.get("decision_hints", {})
     return {
         "snapshot_version": snapshot.get("snapshot_version", SNAPSHOT_VERSION),
@@ -203,9 +188,6 @@ def build_snapshot_storage_view(snapshot: Dict[str, Any]) -> Dict[str, Any]:
             "trend_signal": metrics.get("trend_signal"),
             "ma_arrangement": metrics.get("ma_arrangement"),
         },
-        "scores": {
-            "legacy": legacy,
-            "dual": dual,
-        },
+        "scores": scores,
         "decision_hints": hints,
     }

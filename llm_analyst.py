@@ -8,7 +8,7 @@ from openai import OpenAI
 from typing import Dict, Any
 import os
 
-from analysis_snapshot import flatten_snapshot_for_legacy, get_machine_snapshot_lines
+from analysis_snapshot import flatten_snapshot, get_machine_snapshot_lines
 
 try:
     from google import genai
@@ -30,7 +30,7 @@ def _normalize_context_from_snapshot(context: Dict[str, Any]) -> Dict[str, Any]:
     if not snapshot:
         return context
 
-    flattened = flatten_snapshot_for_legacy(snapshot)
+    flattened = flatten_snapshot(snapshot)
     raw_data = snapshot.get("raw_data", {})
     context.setdefault("stock_info", snapshot.get("stock_info", {}))
     context["tech_data"] = flattened
@@ -51,6 +51,33 @@ def _safe_float(value):
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _pick_effective_volume_ratio(context: Dict[str, Any]):
+    stock_info = context.get("stock_info", {}) or {}
+    tech_data = context.get("tech_data", {}) or {}
+    realtime_data = context.get("realtime_data", {}) or {}
+    ctx_obj = context.get("ctx", {}) or {}
+
+    candidates = [
+        realtime_data.get("volume_ratio"),
+        tech_data.get("volume_ratio"),
+        ctx_obj.get("volume_ratio"),
+    ]
+
+    symbol = stock_info.get("symbol") or tech_data.get("symbol")
+    trade_date = tech_data.get("date")
+    if symbol and trade_date:
+        db_metrics = database.get_daily_metrics(symbol, trade_date)
+        if db_metrics:
+            candidates.append(db_metrics.get("volume_ratio"))
+
+    for value in candidates:
+        numeric = _safe_float(value)
+        if numeric is not None and numeric > 0:
+            return round(numeric, 2)
+
+    return None
 
 
 def _ensure_prompt_derived_fields(context: Dict[str, Any]) -> Dict[str, Any]:
@@ -79,6 +106,21 @@ def _ensure_prompt_derived_fields(context: Dict[str, Any]) -> Dict[str, Any]:
 
     context["extra_indicators"] = extra
     context["extra"] = extra
+
+    computed = dict(context.get("computed") or {})
+
+    effective_volume_ratio = _pick_effective_volume_ratio(context)
+    if effective_volume_ratio is not None:
+        realtime_data["volume_ratio"] = effective_volume_ratio
+        tech_data["volume_ratio"] = effective_volume_ratio
+        if not context.get("ctx"):
+            context["ctx"] = {}
+        context["ctx"]["volume_ratio"] = effective_volume_ratio
+        computed["volume_ratio"] = effective_volume_ratio
+
+    if computed:
+        context["computed"] = computed
+
     return context
 
 
@@ -127,6 +169,7 @@ def get_prompt_from_db(slug: str, context: Dict[str, Any]) -> str:
 
         env = Environment(undefined=Undefined)
         template = env.from_string(template_str)
+        context["datetime"] = __import__("datetime").datetime
         result = template.render(**context)
         return result
 
@@ -265,8 +308,8 @@ def create_speculator_prompt(context: Dict[str, Any], **kwargs) -> str:
     )  # Fallback
     sup = tech_data.get("support", tech_data.get("s1", price * 0.9))
 
-    # Extract strengths from score_details
-    details = tech_data.get("score_details", [])
+    # Extract strengths from dual score details
+    details = tech_data.get("entry_score_details", []) or tech_data.get("holding_score_details", [])
     # Filter only "✅" items
     strengths = [d.replace("✅ ", "") for d in details if "✅" in d]
     strength_str = ", ".join(strengths[:3]) if strengths else "暂无明显优势"
@@ -411,8 +454,8 @@ def create_intraday_prompt(context: Dict[str, Any], **kwargs) -> str:
     res_price = tech_data.get("r1", last_close * 1.02)
     pressure_desc = f"支撑位 {support_price:.2f}, 压力位 {res_price:.2f}"
 
-    # Yesterday Score
-    score = tech_data.get("composite_score", "N/A")
+    entry_score = tech_data.get("entry_score", "N/A")
+    holding_score = tech_data.get("holding_score", "N/A")
 
     # Construct the Prompt
     prompt = f"""# Role
@@ -436,7 +479,7 @@ def create_intraday_prompt(context: Dict[str, Any], **kwargs) -> str:
 3. 若放量突破 [{res_price:.2f}] 压力位，视为转强信号。
 
 # Task
-结合昨日技术形态 (Score: {score}) 与当前盘口多空力量对比，判断当前是“诱多陷阱”还是“缩量洗盘”？给出即时动作。
+结合昨日技术形态 (Entry Score: {entry_score}, Holding Score: {holding_score}) 与当前盘口多空力量对比，判断当前是“诱多陷阱”还是“缩量洗盘”？给出即时动作。
 
 # Output (JSON)
 {{
@@ -626,7 +669,7 @@ def create_agent_prompt(
     res = tech_data.get("resistance", tech_data.get("pivot_point", float(price) * 1.1))
     sup = tech_data.get("support", tech_data.get("s1", float(price) * 0.9))
 
-    details = tech_data.get("score_details", [])
+    details = tech_data.get("entry_score_details", []) or tech_data.get("holding_score_details", [])
     strengths = [d.replace("✅ ", "") for d in details if "✅" in d]
     strength_str = ", ".join(strengths[:3]) if strengths else "暂无明显优势"
 
@@ -731,7 +774,8 @@ def create_agent_prompt(
 **基本面深度数据**：
 - 估值指标：PE(动态)={realtime_data.get("pe_ratio", "N/A")}, PB={realtime_data.get("pb_ratio", "N/A")}, 总市值={realtime_data.get("total_mv", "N/A")}
 - 长期趋势：MA60={tech_data.get("ma60")} (牛熊分界)
-- 综合评分：{tech_data.get("composite_score", "N/A")}
+- 入场评分：{tech_data.get("entry_score", "N/A")}
+- 持仓评分：{tech_data.get("holding_score", "N/A")}
 - 核心优势：{strength_str}
 """
     elif slug == "agent_risk_officer":
@@ -813,7 +857,7 @@ def create_agent_washout_prompt(context: Dict[str, Any], **kwargs) -> str:
     res = tech_data.get("resistance", tech_data.get("pivot_point", float(price) * 1.1))
     sup = tech_data.get("support", tech_data.get("s1", float(price) * 0.9))
 
-    details = tech_data.get("score_details", [])
+    details = tech_data.get("entry_score_details", []) or tech_data.get("holding_score_details", [])
     strengths = [d.replace("✅ ", "") for d in details if "✅" in d]
     strength_str = ", ".join(strengths[:3]) if strengths else "暂无明显优势"
 
@@ -954,6 +998,12 @@ def create_agent_fundamentals_prompt(context: Dict[str, Any], **kwargs) -> str:
     roe = extra.get("roe", realtime_data.get("roe", "N/A"))  # 净资产收益率
     total_mv = extra.get("total_mv", realtime_data.get("total_mv", "N/A"))  # 总市值
     eps = extra.get("eps", realtime_data.get("eps", "N/A"))  # 每股收益
+    report_end_date = extra.get("report_end_date", "N/A")
+    revenue_yoy = extra.get("revenue_yoy", "N/A")
+    profit_yoy = extra.get("profit_yoy", "N/A")
+    ocfps = extra.get("ocfps", "N/A")
+    grossprofit_margin = extra.get("grossprofit_margin", "N/A")
+    debt_to_assets = extra.get("debt_to_assets", "N/A")
 
     computed = {
         "pe_ratio": pe_ratio,
@@ -962,6 +1012,12 @@ def create_agent_fundamentals_prompt(context: Dict[str, Any], **kwargs) -> str:
         "roe": roe,
         "total_mv": total_mv,
         "eps": eps,
+        "report_end_date": report_end_date,
+        "revenue_yoy": revenue_yoy,
+        "profit_yoy": profit_yoy,
+        "ocfps": ocfps,
+        "grossprofit_margin": grossprofit_margin,
+        "debt_to_assets": debt_to_assets,
     }
 
     # 优先从 DB 加载模板
@@ -996,27 +1052,34 @@ def create_agent_fundamentals_prompt(context: Dict[str, Any], **kwargs) -> str:
 
 | 指标 | 数值 | 说明 |
 |------|------|------|
-| 市盈率 (PE-TTM) | {pe_ratio} | 低于行业均值为低估 |
-| 市净率 (PB) | {pb_ratio} | 低于1可能被低估，但需结合行业 |
+| 市盈率 (PE-TTM) | {pe_ratio} | 静态估值参考，需结合增长与景气 |
+| 市净率 (PB) | {pb_ratio} | 需结合ROE与资产质量解读 |
 | 每股净资产 (BVPS) | {bvps} | 反映公司账面价值 |
 | 净资产收益率 (ROE) | {roe} | 高于15%为优秀，核心盈利指标 |
 | 每股收益 (EPS) | {eps} | 反映公司盈利能力 |
 | 总市值 | {total_mv} | 反映公司规模 |
+| 报告期 | {report_end_date} | 财务数据对应期末 |
+| 营收同比 | {revenue_yoy} | 反映收入增长速度 |
+| 扣非净利同比 | {profit_yoy} | 反映核心利润增长速度 |
+| 每股经营现金流 | {ocfps} | 反映利润现金含量 |
+| 毛利率 | {grossprofit_margin} | 反映产品盈利空间 |
+| 资产负债率 | {debt_to_assets} | 反映杠杆与偿债压力 |
 
 **【辅助参考 - 技术面快照】**
 
-- 综合评分：{tech_data.get("composite_score", "N/A")}
+- 入场评分：{tech_data.get("entry_score", "N/A")}
+- 持仓评分：{tech_data.get("holding_score", "N/A")}
 - 均线排列：{tech_data.get("ma_arrangement", "未知")}
 - MA60（牛熊线）：{tech_data.get("ma60", "N/A")}
-- 核心优势：{", ".join([d.replace("✅ ", "") for d in tech_data.get("score_details", []) if "✅" in d][:3]) or "暂无"}
+- 核心优势：{", ".join([d.replace("✅ ", "") for d in (tech_data.get("entry_score_details", []) or tech_data.get("holding_score_details", [])) if "✅" in d][:3]) or "暂无"}
 
 **请按照以下框架进行分析：**
 
-1. **估值判断**：当前PE/PB是否合理？相对于行业平均水平是高估还是低估？
-2. **盈利质量**：ROE水平如何？EPS趋势如何？公司盈利能力是否可持续？
-3. **资产质量**：每股净资产与当前股价的关系，PB是否有安全边际？
-4. **综合评级**：从基本面角度，当前价位是否具有投资价值？
-5. **风险提示**：基本面存在的隐患或不确定性
+1. **估值判断**：当前PE/PB处于什么水平？是否需要很强的增长才能消化估值？
+2. **成长质量**：结合营收同比、扣非净利同比、ROE，判断当前增长是否扎实。
+3. **现金流与资产质量**：结合每股经营现金流、每股净资产、资产负债率，判断财务质量。
+4. **综合评级**：从基本面角度，当前价位更偏向低估、合理还是偏贵？
+5. **风险提示**：明确指出哪些关键数据缺失，避免超出数据能力范围下结论。
 
 要求：
 1. 严格基于财务指标和估值体系分析，不要过多涉及技术面。
@@ -1151,8 +1214,8 @@ def create_deep_candidate_prompt(context: Dict[str, Any], **kwargs) -> str:
     )  # Fallback
     sup = tech_data.get("support", tech_data.get("s1", price * 0.9))
 
-    # Extract strengths from score_details
-    details = tech_data.get("score_details", [])
+    # Extract strengths from dual score details
+    details = tech_data.get("entry_score_details", []) or tech_data.get("holding_score_details", [])
     # Filter only "✅" items
     strengths = [d.replace("✅ ", "") for d in details if "✅" in d]
     strength_str = ", ".join(strengths[:3]) if strengths else "暂无明显优势"
@@ -1214,8 +1277,8 @@ def create_agent_trend_follower_prompt(context: Dict[str, Any], **kwargs) -> str
     )  # Fallback
     sup = tech_data.get("support", tech_data.get("s1", price * 0.9))
 
-    # Extract strengths from score_details
-    details = tech_data.get("score_details", [])
+    # Extract strengths from dual score details
+    details = tech_data.get("entry_score_details", []) or tech_data.get("holding_score_details", [])
     # Filter only "✅" items
     strengths = [d.replace("✅ ", "") for d in details if "✅" in d]
     strength_str = ", ".join(strengths[:3]) if strengths else "暂无明显优势"
@@ -1312,9 +1375,9 @@ def create_analysis_prompt(
             - macd_dif, macd_dea, macd_signal (float): MACD指标
             - rsi (float): RSI指标
             - kdj_k, kdj_d (float): KDJ指标
-            - composite_score (float): 综合技术评分
+            - entry_score, holding_score (float): 双评分
             - resistance, support (float): 压力位与支撑位
-            - score_details (list): 评分详情标签
+            - entry_score_details, holding_score_details (list): 评分详情标签
 
         analysis_type (str): 分析模式
             - 'holding': 持仓日报分析 (默认)
@@ -1609,26 +1672,20 @@ def format_etf_section(
     """
     Format a complete ETF analysis section in Markdown (simplified, long-term focused)
     """
-    # 综合评分显示
-    score = tech_data.get("composite_score", "N/A")
-    rating = tech_data.get("rating", "未知")
-
-    # 评分详情
-    score_breakdown = tech_data.get("score_breakdown", [])
-    score_details = tech_data.get("score_details", [])
+    entry_score = tech_data.get("entry_score", "N/A")
+    holding_score = tech_data.get("holding_score", "N/A")
+    holding_state_label = tech_data.get("holding_state_label", tech_data.get("holding_state", "N/A"))
+    breakdown_items = tech_data.get("holding_score_breakdown", [])
 
     # 构建评分进度条
     score_section = ""
-    if score_breakdown:
+    if breakdown_items:
         score_section = "\n**评分明细：**\n"
-        for name, got, total in score_breakdown:
+        for name, got, total in breakdown_items:
             # 计算填充进度条
             filled = int(got / total * 10) if total > 0 else 0
             bar = "█" * filled + "░" * (10 - filled)
             score_section += f"- {name}：[{bar}] {got}/{total}分\n"
-
-    # 操作建议
-    operation_suggestion = tech_data.get("operation_suggestion", "暂无建议")
 
     # 判断价格与MA60关系
     close = tech_data.get("close", 0)
@@ -1639,9 +1696,11 @@ def format_etf_section(
 ## {stock_info["symbol"]} - {stock_info["name"]} 【ETF】
 ### 📅 报告日期：{tech_data.get("date", "未知")}
 
-### 📊 ETF长期持有评分：{score}分 - {rating}
+### 📊 双评分快照
 
-**💡 操作建议：{operation_suggestion}**
+- Entry Score: **{entry_score}**
+- Holding Score: **{holding_score}**
+- Holding State: **{holding_state_label}**
 
 {score_section}
 
@@ -1884,27 +1943,19 @@ def format_stock_section(
     # 注意：现在 LLM 直接输出 Markdown 表格，无需再调用 format_json_plan 解析
     # formatted_analysis = format_json_plan(llm_analysis)
 
-    # 综合评分显示
-    score = tech_data.get("composite_score", "N/A")
-    rating = tech_data.get("rating", "未知")
-
-    # 评分详情
-    score_breakdown = tech_data.get("score_breakdown", [])
     entry_score = tech_data.get("entry_score")
     holding_score = tech_data.get("holding_score")
     holding_state_label = tech_data.get("holding_state_label", tech_data.get("holding_state"))
+    breakdown_items = tech_data.get("entry_score_breakdown", [])
 
     score_section = ""
-    if score_breakdown:
+    if breakdown_items:
         score_section = "\n**📊 评分明细：**\n"
-        for name, got, total in score_breakdown:
+        for name, got, total in breakdown_items:
             # 计算填充进度条 (visual bar)
             filled = int(got / total * 10) if total > 0 else 0
             bar = "▮" * filled + "▯" * (10 - filled)
             score_section += f"- {name}：`{bar}` {got}/{total}\n"
-
-    # 操作建议
-    operation_suggestion = tech_data.get("operation_suggestion", "暂无建议")
 
     # 新闻区块
     news_content = tech_data.get("latest_news", None)
@@ -1928,9 +1979,7 @@ def format_stock_section(
 ## {stock_info["symbol"]} - {stock_info["name"]}
 ### 📅 报告日期：{tech_data.get("date", "未知")}
 
-### 🚀 综合评分：{score}分 - {rating}
-
-**💡 策略建议：{operation_suggestion}**
+### 🚀 双评分快照
 
 {dual_score_block}
 

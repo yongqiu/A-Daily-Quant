@@ -50,7 +50,6 @@ from data_fetcher import (
 )
 from indicator_calc import calculate_indicators, get_latest_metrics  # 评分 API 需要导入
 from monitor_engine import get_realtime_data  # 评分 API 需要导入
-from etf_score import apply_etf_score  # ETF 评分需要导入
 from data_provider.base import DataFetcherManager  # 新的数据管理器
 import database  # 添加数据库导入
 from stock_screener import print_detailed_metrics  # 导入日志辅助函数
@@ -151,13 +150,11 @@ def _build_score_snapshot_cache_key(
     symbol: str,
     cost_price: float,
     asset_type: str,
-    score_mode: str = "legacy",
     trade_date: Optional[str] = None,
 ) -> str:
     return "|".join(
         [
             trade_date or datetime.now().strftime("%Y-%m-%d"),
-            score_mode,
             symbol,
             asset_type or "stock",
             f"{float(cost_price or 0):.4f}",
@@ -197,25 +194,18 @@ def _merge_score_fields(target: Dict[str, Any], metrics: Optional[Dict[str, Any]
     target["holding_state_label"] = metrics.get("holding_state_label")
     target["entry_score_details"] = metrics.get("entry_score_details", [])
     target["holding_score_details"] = metrics.get("holding_score_details", [])
-    target["composite_score"] = metrics.get(
-        "composite_score", target.get("composite_score")
-    )
-    if metrics.get("rating"):
-        target["rating"] = metrics.get("rating")
 
 
 def _get_or_compute_score_snapshot(
     symbol: str,
     cost_price: float,
     asset_type: str,
-    score_mode: str = "legacy",
     trade_date: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     cache_key = _build_score_snapshot_cache_key(
         symbol=symbol,
         cost_price=cost_price,
         asset_type=asset_type,
-        score_mode=score_mode,
         trade_date=trade_date,
     )
     cached = _get_cached_score_snapshot(cache_key)
@@ -227,7 +217,6 @@ def _get_or_compute_score_snapshot(
         cost_price=cost_price,
         asset_type=asset_type,
         include_news=False,
-        score_mode=score_mode,
         trade_date=trade_date,
     )
     if metrics:
@@ -260,7 +249,6 @@ def _attach_dual_scores_to_items(items: list, price_key: str = "price") -> list:
                 symbol=symbol,
                 cost_price=cost_price,
                 asset_type=asset_type,
-                score_mode="legacy",
             )
             _merge_score_fields(cloned, metrics)
         except Exception as e:
@@ -577,7 +565,6 @@ async def get_selections(date: str = None):
     selections.sort(
         key=lambda item: (
             -float(item.get("entry_score") or -1),
-            -float(item.get("composite_score") or -1),
             -float(item.get("volume_ratio") or 0),
         )
     )
@@ -590,9 +577,16 @@ async def get_selections(date: str = None):
             cursor.execute(
                 "SELECT DISTINCT selection_date FROM daily_selections ORDER BY selection_date DESC LIMIT 30"
             )
-            dates = [
-                row["selection_date"].strftime("%Y-%m-%d") for row in cursor.fetchall()
-            ]
+            dates = []
+            for row in cursor.fetchall():
+                value = row.get("selection_date")
+                if not value:
+                    continue
+                dates.append(
+                    value.strftime("%Y-%m-%d")
+                    if hasattr(value, "strftime")
+                    else str(value)[:10]
+                )
     except Exception as e:
         print(f"❌ Error getting available dates: {e}")
         dates = []
@@ -681,7 +675,7 @@ async def get_kline_data(symbol: str, period: str = "daily"):
                 df, _ = data_manager.get_daily_data(symbol, start_date=start_date)
             except Exception as e:
                 print(
-                    f"DataManager Fetch Failed: {e}, falling back to legacy dispatcher"
+                    f"DataManager Fetch Failed: {e}, falling back to dispatcher"
                 )
                 df = fetch_data_dispatcher(
                     symbol, asset_type, start_date, period=period
@@ -919,7 +913,6 @@ realtime_analysis_status = {}  # {symbol: {"status": "idle"|"running"|"success"|
 @app.post("/api/analyze/{symbol}/score")
 async def calculate_stock_score(
     symbol: str,
-    score_mode: str = Query("legacy"),
     trade_date: Optional[str] = Query(None),
 ):
     """
@@ -944,7 +937,6 @@ async def calculate_stock_score(
             cost_price=cost_price,
             asset_type=asset_type,
             include_news=True,
-            score_mode=score_mode,
             trade_date=trade_date,
         )
 
@@ -962,7 +954,6 @@ async def calculate_stock_score(
                 symbol=symbol,
                 cost_price=cost_price,
                 asset_type=asset_type,
-                score_mode=score_mode,
                 trade_date=trade_date,
             ),
             latest,
@@ -996,7 +987,6 @@ async def calculate_stock_score(
 async def get_stock_metrics(
     symbol: str,
     date: str = None,
-    score_mode: str = Query("legacy"),
 ):
     """从数据库获取已保存的指标评分，不在详情面板打开时触发重算。"""
     today = datetime.now().strftime("%Y-%m-%d")
@@ -1005,10 +995,6 @@ async def get_stock_metrics(
 
     metrics = database.get_daily_metrics(symbol, date)
     if metrics:
-        metrics["score_mode"] = score_mode or "legacy"
-        metrics["score_mode_label"] = (
-            "双评分模式" if score_mode and score_mode != "legacy" else "原评分方式"
-        )
         return {"status": "success", "data": metrics}
 
     return {"status": "not_found", "message": "No metrics found for this date"}
@@ -1233,14 +1219,17 @@ async def analyze_stock_report_stream(
                         snapshot = context_payload.get("snapshot", {})
                         # Save to DB
                         try:
-                            # 我们构建一个复合分析对象
+                            # 保存双评分分析对象
                             analysis_data = {
                                 "price": rt_data.get("price", 0),
                                 "ma20": tech_data.get("ma20", 0),
                                 "trend_signal": tech_data.get(
                                     "ma_arrangement", "MultiAgent"
                                 ),
-                                "composite_score": tech_data.get("composite_score", 0),
+                                "entry_score": tech_data.get("entry_score"),
+                                "holding_score": tech_data.get("holding_score"),
+                                "holding_state": tech_data.get("holding_state"),
+                                "holding_state_label": tech_data.get("holding_state_label"),
                                 "snapshot_version": snapshot.get("snapshot_version", 1),
                                 "analysis_snapshot": build_snapshot_storage_view(snapshot),
                                 "final_action": decision.get("final_action"),
@@ -1289,9 +1278,10 @@ async def analyze_stock_report_stream(
                                         "volume_ratio": current_selection.get(
                                             "volume_ratio", 0
                                         ),
-                                        "composite_score": analysis_data[
-                                            "composite_score"
-                                        ],
+                                        "entry_score": analysis_data.get("entry_score"),
+                                        "holding_score": analysis_data.get("holding_score"),
+                                        "holding_state": analysis_data.get("holding_state"),
+                                        "holding_state_label": analysis_data.get("holding_state_label"),
                                         "ai_analysis": accumulated_html,  # 存储 HTML 还是 Markdown？Agent 返回混合内容（Agents 返回 HTML，CIO 返回 MD）。
                                     }
                                     database.save_daily_selection(
@@ -1366,7 +1356,10 @@ async def analyze_stock_report_stream(
                     "price": rt_data.get("price", 0),
                     "ma20": tech_data.get("ma20", 0),
                     "trend_signal": tech_data.get("ma_arrangement", ""),
-                    "composite_score": tech_data.get("composite_score", 0),
+                    "entry_score": tech_data.get("entry_score"),
+                    "holding_score": tech_data.get("holding_score"),
+                    "holding_state": tech_data.get("holding_state"),
+                    "holding_state_label": tech_data.get("holding_state_label"),
                     "snapshot_version": context_payload.get("snapshot", {}).get("snapshot_version", 1),
                     "analysis_snapshot": build_snapshot_storage_view(context_payload.get("snapshot", {})),
                     "ai_analysis": formatted,
@@ -1415,7 +1408,10 @@ async def analyze_stock_report_stream(
                                 ),
                                 "close_price": analysis_data["price"],
                                 "volume_ratio": current_sel.get("volume_ratio", 0),
-                                "composite_score": analysis_data["composite_score"],
+                                "entry_score": analysis_data.get("entry_score"),
+                                "holding_score": analysis_data.get("holding_score"),
+                                "holding_state": analysis_data.get("holding_state"),
+                                "holding_state_label": analysis_data.get("holding_state_label"),
                                 "ai_analysis": formatted,
                             }
                             database.save_daily_selection(target_date, sel_update)
@@ -1472,7 +1468,10 @@ async def analyze_stock_intraday(symbol: str):
                 yield f"data: {json.dumps({'type': 'error', 'content': '无法获取腾讯实时数据'})}\n\n"
                 return
 
-            yield f"data: {json.dumps({'type': 'step', 'content': f'✅ 获取实时行情: ￥{rt_data['price']} ({rt_data['change_pct']}%)'})}\n\n"
+            realtime_step = (
+                f"✅ 获取实时行情: ￥{rt_data['price']} ({rt_data['change_pct']}%)"
+            )
+            yield f"data: {json.dumps({'type': 'step', 'content': realtime_step})}\n\n"
             yield f"data: {json.dumps({'type': 'progress', 'value': 20, 'message': '📊 获取技术形态上下文...'})}\n\n"
 
             # 2. Get Context (Metrics)
@@ -1836,7 +1835,10 @@ async def generate_single_stock_report(symbol: str, background_tasks: Background
                 "price": latest.get("close", 0),  # 现在是实时价格
                 "ma20": latest.get("ma20", 0),
                 "trend_signal": latest.get("ma_arrangement", "未知"),
-                "composite_score": latest.get("composite_score", 0),
+                "entry_score": latest.get("entry_score"),
+                "holding_score": latest.get("holding_score"),
+                "holding_state": latest.get("holding_state"),
+                "holding_state_label": latest.get("holding_state_label"),
                 "snapshot_version": snapshot.get("snapshot_version", 1),
                 "analysis_snapshot": build_snapshot_storage_view(snapshot),
                 "ai_analysis": formatted_report,  # 保存完整的 markdown 报告
@@ -1928,7 +1930,6 @@ async def get_analysis_history(
                             "change_pct": intraday_result["change_pct"],
                             "ma20": 0,  # 盘中分析不存储 MA20
                             "trend_signal": "盘中",
-                            "composite_score": 0,  # 盘中分析不使用综合评分
                             "ai_analysis": intraday_result["ai_content"],
                             "html": html_result,
                             "mode": "intraday",
@@ -1980,7 +1981,10 @@ async def get_analysis_history(
                         "price": result["price"],
                         "ma20": result["ma20"],
                         "trend_signal": result["trend_signal"],
-                        "composite_score": result["composite_score"],
+                        "entry_score": result.get("entry_score"),
+                        "holding_score": result.get("holding_score"),
+                        "holding_state": result.get("holding_state"),
+                        "holding_state_label": result.get("holding_state_label"),
                         "snapshot_version": result.get("snapshot_version", 1),
                         "analysis_snapshot": result.get("analysis_snapshot"),
                         "final_action": result.get("final_action"),
@@ -2024,7 +2028,10 @@ async def get_analysis_history(
                         "price": selection.get("close_price", 0),
                         "ma20": 0,  # 不直接存储在精选表中
                         "trend_signal": "Candidate",
-                        "composite_score": selection["composite_score"],
+                        "entry_score": selection.get("entry_score"),
+                        "holding_score": selection.get("holding_score"),
+                        "holding_state": selection.get("holding_state"),
+                        "holding_state_label": selection.get("holding_state_label"),
                         "ai_analysis": content,
                         "html": html_result,
                         "mode": "candidate",
@@ -2242,7 +2249,10 @@ async def analyze_candidate_stock(symbol: str, background_tasks: BackgroundTasks
                     "name": stock_info["name"],
                     "close_price": latest["close"],
                     "volume_ratio": latest.get("volume_ratio", 0),
-                    "composite_score": latest.get("composite_score", 0),
+                    "entry_score": latest.get("entry_score"),
+                    "holding_score": latest.get("holding_score"),
+                    "holding_state": latest.get("holding_state"),
+                    "holding_state_label": latest.get("holding_state_label"),
                     "ai_analysis": formatted_report,
                 }
                 analysis_date = datetime.now().strftime("%Y-%m-%d")
@@ -2260,7 +2270,7 @@ async def analyze_candidate_stock(symbol: str, background_tasks: BackgroundTasks
                     "symbol": symbol,
                     "name": stock_info["name"],
                     "price": latest["close"],
-                    "score": latest.get("composite_score", 0),
+                    "score": latest.get("entry_score", 0),
                 },
             }
 
@@ -2383,6 +2393,13 @@ else:
 
 
 if __name__ == "__main__":
+    app_host = os.getenv("APP_HOST", "127.0.0.1")
+    app_port = int(os.getenv("APP_PORT", "8100"))
+    app_reload = os.getenv("APP_RELOAD", "true").lower() == "true"
     uvicorn.run(
-        "web_server:app", host="127.0.0.1", port=8100, reload=True, access_log=False
+        "web_server:app",
+        host=app_host,
+        port=app_port,
+        reload=app_reload,
+        access_log=False,
     )

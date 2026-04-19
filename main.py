@@ -31,8 +31,8 @@ from data_fetcher import fetch_stock_data, calculate_start_date
 from indicator_calc import calculate_indicators, get_latest_metrics
 from llm_analyst import generate_analysis, format_stock_section
 from report_generator import generate_html_report
+from scoring_pipeline import enrich_metrics_with_scores
 from stock_screener import run_stock_selection
-from etf_score import apply_etf_score, format_etf_score_section
 import portfolio_manager
 import database
 
@@ -144,7 +144,7 @@ def process_portfolio(config: Dict[str, Any], date_str: str) -> str:
 
     # --- 1. Generate Summary Table ---
     content += "## 📈 持仓概览\n\n"
-    content += "| 代码 | 名称 | 当前价 | 趋势状态 | 综合评分 | 建议操作 |\n"
+    content += "| 代码 | 名称 | 当前价 | 趋势状态 | 入场评分 | 持仓评分 |\n"
     content += "|---|---|---|---|---|---|\n"
 
     full_sections = ""
@@ -181,11 +181,10 @@ def process_portfolio(config: Dict[str, Any], date_str: str) -> str:
             # Add row to summary table
             # Status: Trend Signal or Rating
             status = data.get("trend_signal", "未知")
-            score = data.get("composite_score", "N/A")
-            rating = data.get("rating", "")
-            op_sugg = data.get("operation_suggestion", "--")
+            entry_score = data.get("entry_score", "N/A")
+            holding_score = data.get("holding_score", "N/A")
 
-            content += f"| {stock_info['symbol']} | [{stock_info['name']}](#{stock_info['symbol']}-{stock_info['name']}) | ¥{data['close']} | {status} | {score} ({rating}) | {op_sugg} |\n"
+            content += f"| {stock_info['symbol']} | [{stock_info['name']}](#{stock_info['symbol']}-{stock_info['name']}) | ¥{data['close']} | {status} | {entry_score} | {holding_score} |\n"
 
         except Exception as e:
             # Continue to next stock even if one fails
@@ -244,7 +243,6 @@ def analyze_stock_with_data(
             "markdown": f"\n## {symbol} - {name}\n\n**❌ 指标计算失败，跳过分析。**\n\n---\n",
             "data": {"close": 0, "trend_signal": "Error"},
         }
-
     # Step 3.5: Get realtime price (获取实时价格) - 与web_server.py保持一致
     from monitor_engine import get_realtime_data
 
@@ -273,16 +271,11 @@ def analyze_stock_with_data(
             f"⚠️ {symbol} - 无法获取实时价格，使用历史收盘价: {tech_data.get('close')}"
         )
 
-    # Step 3.7: Apply ETF-specific scoring if asset_type is 'etf'
-    if asset_type == "etf":
-        tech_data = apply_etf_score(tech_data)
-        print(
-            f"📈 当前价格: ¥{tech_data['close']} | ETF Score: {tech_data['composite_score']} ({tech_data['rating']})"
-        )
-    else:
-        print(
-            f"📈 当前价格: ¥{tech_data['close']} | Trend: {tech_data['trend_signal']}"
-        )
+    tech_data = enrich_metrics_with_scores(tech_data)
+
+    print(
+        f"📈 当前价格: ¥{tech_data['close']} | Trend: {tech_data['trend_signal']}"
+    )
 
     # Step 4: Determine which API to use
     provider = config["api"].get("provider", "openai")
@@ -325,7 +318,10 @@ def analyze_stock_with_data(
             "price": tech_data["close"],  # 现在是实时价格
             "ma20": tech_data["ma20"],
             "trend_signal": tech_data.get("trend_signal", "未知"),
-            "composite_score": tech_data.get("composite_score", 0),
+            "entry_score": tech_data.get("entry_score"),
+            "holding_score": tech_data.get("holding_score"),
+            "holding_state": tech_data.get("holding_state"),
+            "holding_state_label": tech_data.get("holding_state_label"),
             "ai_analysis": formatted_report,  # 🔥 关键修改：存入完整的格式化报告
         }
         database.save_holding_analysis(
@@ -406,10 +402,36 @@ def process_candidates(
                         "name": stock_info["name"],
                         "close_price": tech_data["close"],
                         "volume_ratio": tech_data["volume_ratio"],
-                        "composite_score": tech_data.get("composite_score", 0),
+                        "entry_score": tech_data.get("entry_score"),
+                        "holding_score": tech_data.get("holding_score"),
+                        "holding_state": tech_data.get("holding_state"),
+                        "holding_state_label": tech_data.get("holding_state_label"),
                         "ai_analysis": formatted_report,  # Save the technical report
                     }
                     database.save_daily_selection(date_str, selection_data)
+
+                    # 同步保存评分快照，避免前端列表必须进入详情并重新计算后才显示双评分。
+                    metrics_payload = dict(tech_data)
+                    metrics_payload["price"] = metrics_payload.get(
+                        "price", metrics_payload.get("close", 0)
+                    )
+                    metrics_payload["change_pct"] = metrics_payload.get(
+                        "change_pct",
+                        metrics_payload.get(
+                            "change_pct_today", metrics_payload.get("price_change_pct", 0)
+                        ),
+                    )
+                    if not metrics_payload.get("entry_score_details"):
+                        metrics_payload["entry_score_details"] = metrics_payload.get(
+                            "entry_score_reasons", []
+                        )
+
+                    pattern_list = metrics_payload.get("pattern_details", [])
+                    metrics_payload["pattern_flags"] = (
+                        ",".join(pattern_list) if pattern_list else ""
+                    )
+
+                    database.save_daily_metrics(date_str, metrics_payload)
                 except Exception as e:
                     print(
                         f"❌ Error saving selection to DB for {stock_info['symbol']}: {e}"
@@ -417,9 +439,9 @@ def process_candidates(
 
                 # Add to Table
                 # Short Summary
-                summary = tech_data.get("rating", "观察")
+                summary = tech_data.get("holding_state_label", tech_data.get("holding_state", "观察"))
 
-                table_content += f"| {stock_info['symbol']} | [{stock_info['name']}](#{stock_info['symbol']}-{stock_info['name']}) | ¥{tech_data['close']} | {tech_data['volume_ratio']} | {tech_data['composite_score']} | {summary} |\n"
+                table_content += f"| {stock_info['symbol']} | [{stock_info['name']}](#{stock_info['symbol']}-{stock_info['name']}) | ¥{tech_data['close']} | {tech_data['volume_ratio']} | {tech_data.get('entry_score', 'N/A')} | {summary} |\n"
 
                 # Format Detail Section
                 details_content += (
@@ -535,7 +557,7 @@ def main():
             )
             with open(output_filename_full, "w", encoding="utf-8") as f:
                 f.write(full_content)
-            print(f"✅ [Legacy] Full Markdown Report saved to: {output_filename_full}")
+            print(f"✅ Full Markdown Report saved to: {output_filename_full}")
 
             # HTML Gen
             output_filename_html = os.path.join(
@@ -544,10 +566,10 @@ def main():
             generate_html_report(
                 holdings_result, candidates_result, output_filename_html
             )
-            print(f"✅ [Legacy] HTML Report saved")
+            print("✅ HTML Report saved")
 
         except Exception as e:
-            print(f"⚠️ Error creating legacy full report: {e}")
+            print(f"⚠️ Error creating full report: {e}")
 
     print(f"\n{'-' * 60}")
     print(f"🏁 Task [{args.section}] Completed.")

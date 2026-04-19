@@ -69,10 +69,10 @@ defineProps({
   }
 })
 
-const getRiskColor = (rating) => {
-  if (!rating) return 'bg-gray-500/10 text-gray-400 border-gray-500/30'
-  if (rating.includes('低')) return 'bg-green-500/10 text-green-400 border-green-500/30'
-  if (rating.includes('高')) return 'bg-red-500/10 text-red-400 border-red-500/30'
+const getRiskColor = (riskRating) => {
+  if (!riskRating) return 'bg-gray-500/10 text-gray-400 border-gray-500/30'
+  if (riskRating.includes('低')) return 'bg-green-500/10 text-green-400 border-green-500/30'
+  if (riskRating.includes('高')) return 'bg-red-500/10 text-red-400 border-red-500/30'
   return 'bg-yellow-500/10 text-yellow-400 border-yellow-500/30' // 中
 }
 </script>

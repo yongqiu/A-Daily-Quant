@@ -222,6 +222,58 @@ def get_connection():
     )
 
 
+def _sqlite_rebuild_table(
+    cursor,
+    table_name: str,
+    column_defs: List[str],
+    unique_defs: List[str],
+    drop_columns: List[str],
+):
+    cursor.execute(f"PRAGMA table_info({table_name})")
+    existing_columns = [row["name"] for row in cursor.fetchall()]
+    if not any(column in existing_columns for column in drop_columns):
+        return
+
+    new_columns = []
+    for column_def in column_defs:
+        stripped = column_def.strip()
+        if not stripped:
+            continue
+        new_columns.append(stripped.split()[0])
+
+    keep_columns = [
+        column
+        for column in existing_columns
+        if column in new_columns and column not in drop_columns
+    ]
+    backup_table = f"{table_name}_old_score_migration"
+
+    print(f"⚙️ Migrating DB: Rebuilding {table_name} without old score columns (SQLite)...")
+    cursor.execute(f"DROP TABLE IF EXISTS {backup_table}")
+    cursor.execute(f"ALTER TABLE {table_name} RENAME TO {backup_table}")
+    create_sql = (
+        f"CREATE TABLE {table_name} ("
+        + ", ".join(column_defs + unique_defs)
+        + ")"
+    )
+    cursor.execute(create_sql)
+    if keep_columns:
+        columns_sql = ", ".join(keep_columns)
+        cursor.execute(
+            f"INSERT INTO {table_name} ({columns_sql}) "
+            f"SELECT {columns_sql} FROM {backup_table}"
+        )
+    cursor.execute(f"DROP TABLE {backup_table}")
+
+
+def _mysql_drop_columns_if_exist(cursor, table_name: str, column_names: List[str]):
+    for column_name in column_names:
+        cursor.execute(f"SHOW COLUMNS FROM {table_name} LIKE '{column_name}'")
+        if cursor.fetchone():
+            print(f"⚙️ Migrating DB: Dropping {table_name}.{column_name}...")
+            cursor.execute(f"ALTER TABLE {table_name} DROP COLUMN {column_name}")
+
+
 def init_db():
     """Initialize database tables"""
     create_table_sql = """
@@ -247,7 +299,10 @@ def init_db():
         ma20 DECIMAL(10, 4),
         z_score DECIMAL(10, 4) DEFAULT 0,
         trend_signal VARCHAR(50),
-        composite_score INT,
+        entry_score INT,
+        holding_score INT,
+        holding_state VARCHAR(32),
+        holding_state_label VARCHAR(32),
         snapshot_version INT DEFAULT 1,
         analysis_snapshot JSON NULL,
         final_action VARCHAR(20) NULL,
@@ -269,7 +324,10 @@ def init_db():
         name VARCHAR(100),
         close_price DECIMAL(10, 4),
         volume_ratio DECIMAL(10, 2),
-        composite_score INT,
+        entry_score INT,
+        holding_score INT,
+        holding_state VARCHAR(32),
+        holding_state_label VARCHAR(32),
         ai_analysis TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         UNIQUE KEY unique_daily_selection (selection_date, symbol)
@@ -301,22 +359,17 @@ def init_db():
         volume_ratio DECIMAL(10, 2),
         
         /* Scoring & Meta */
-        composite_score INT,
         entry_score INT,
         holding_score INT,
         holding_state VARCHAR(32),
         holding_state_label VARCHAR(32),
-        rating VARCHAR(20),
         pattern_flags TEXT,
         
         /* Extended Analysis Fields (JSON) */
-        score_breakdown JSON,
-        score_details JSON,
         entry_score_breakdown JSON,
         entry_score_details JSON,
         holding_score_breakdown JSON,
         holding_score_details JSON,
-        operation_suggestion TEXT,
         
         /* Additional Metrics */
         stop_loss_suggest DECIMAL(10, 2),
@@ -425,6 +478,101 @@ def check_schema_updates():
                                 "ALTER TABLE holdings ADD COLUMN is_starred TINYINT(1) NOT NULL DEFAULT 0"
                             )
 
+                        _sqlite_rebuild_table(
+                            cursor,
+                            "holding_analysis",
+                            [
+                                "id INT AUTO_INCREMENT PRIMARY KEY",
+                                "symbol VARCHAR(20) NOT NULL",
+                                "analysis_date DATE NOT NULL",
+                                "mode VARCHAR(20) DEFAULT 'multi_agent'",
+                                "price DECIMAL(10, 4)",
+                                "ma20 DECIMAL(10, 4)",
+                                "z_score DECIMAL(10, 4) DEFAULT 0",
+                                "trend_signal VARCHAR(50)",
+                                "entry_score INT",
+                                "holding_score INT",
+                                "holding_state VARCHAR(32)",
+                                "holding_state_label VARCHAR(32)",
+                                "snapshot_version INT DEFAULT 1",
+                                "analysis_snapshot JSON NULL",
+                                "final_action VARCHAR(20) NULL",
+                                "risk_level VARCHAR(20) NULL",
+                                "consensus_level VARCHAR(20) NULL",
+                                "agent_outputs JSON NULL",
+                                "ai_analysis TEXT",
+                                "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+                            ],
+                            [
+                                "UNIQUE KEY unique_daily_analysis (symbol, analysis_date, mode)",
+                                "FOREIGN KEY (symbol) REFERENCES holdings(symbol) ON DELETE CASCADE",
+                            ],
+                            ["composite_score"],
+                        )
+                        _sqlite_rebuild_table(
+                            cursor,
+                            "daily_selections",
+                            [
+                                "id INT AUTO_INCREMENT PRIMARY KEY",
+                                "selection_date DATE NOT NULL",
+                                "symbol VARCHAR(20) NOT NULL",
+                                "name VARCHAR(100)",
+                                "close_price DECIMAL(10, 4)",
+                                "volume_ratio DECIMAL(10, 2)",
+                                "entry_score INT",
+                                "holding_score INT",
+                                "holding_state VARCHAR(32)",
+                                "holding_state_label VARCHAR(32)",
+                                "ai_analysis TEXT",
+                                "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+                            ],
+                            ["UNIQUE KEY unique_daily_selection (selection_date, symbol)"],
+                            ["composite_score"],
+                        )
+                        _sqlite_rebuild_table(
+                            cursor,
+                            "daily_metrics",
+                            [
+                                "id INT AUTO_INCREMENT PRIMARY KEY",
+                                "symbol VARCHAR(20) NOT NULL",
+                                "date DATE NOT NULL",
+                                "price DECIMAL(10, 4)",
+                                "change_pct DECIMAL(10, 2)",
+                                "ma5 DECIMAL(10, 4)",
+                                "ma20 DECIMAL(10, 4)",
+                                "ma60 DECIMAL(10, 4)",
+                                "rsi DECIMAL(10, 2)",
+                                "kdj_k DECIMAL(10, 2)",
+                                "kdj_d DECIMAL(10, 2)",
+                                "macd_dif DECIMAL(10, 4)",
+                                "macd_dea DECIMAL(10, 4)",
+                                "macd_macd DECIMAL(10, 4)",
+                                "volume_ratio DECIMAL(10, 2)",
+                                "entry_score INT",
+                                "holding_score INT",
+                                "holding_state VARCHAR(32)",
+                                "holding_state_label VARCHAR(32)",
+                                "pattern_flags TEXT",
+                                "entry_score_breakdown JSON",
+                                "entry_score_details JSON",
+                                "holding_score_breakdown JSON",
+                                "holding_score_details JSON",
+                                "stop_loss_suggest DECIMAL(10, 2)",
+                                "atr_pct DECIMAL(10, 2)",
+                                "price_vs_high120 DECIMAL(10, 4)",
+                                "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+                                "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+                            ],
+                            ["UNIQUE KEY unique_daily_metric (symbol, date)"],
+                            [
+                                "composite_score",
+                                "rating",
+                                "score_breakdown",
+                                "score_details",
+                                "operation_suggestion",
+                            ],
+                        )
+
                         cursor.execute("PRAGMA table_info(daily_metrics)")
                         daily_metric_columns = [row["name"] for row in cursor.fetchall()]
                         sqlite_dual_metric_columns = [
@@ -454,6 +602,22 @@ def check_schema_updates():
                             ("consensus_level", "VARCHAR(20)"),
                             ("agent_outputs", "TEXT"),
                         ]
+                        cursor.execute("PRAGMA table_info(holding_analysis)")
+                        analysis_columns = [row["name"] for row in cursor.fetchall()]
+                        sqlite_dual_analysis_columns = [
+                            ("entry_score", "INTEGER"),
+                            ("holding_score", "INTEGER"),
+                            ("holding_state", "VARCHAR(32)"),
+                            ("holding_state_label", "VARCHAR(32)"),
+                        ]
+                        for column_name, column_type in sqlite_dual_analysis_columns:
+                            if column_name not in analysis_columns:
+                                print(
+                                    f"⚙️ Migrating DB: Adding {column_name} column to holding_analysis (SQLite)..."
+                                )
+                                cursor.execute(
+                                    f"ALTER TABLE holding_analysis ADD COLUMN {column_name} {column_type}"
+                                )
                         cursor.execute("PRAGMA table_info(holding_analysis)")
                         analysis_columns = [row["name"] for row in cursor.fetchall()]
                         for column_name, column_type in sqlite_analysis_columns:
@@ -508,8 +672,30 @@ def check_schema_updates():
                             "ALTER TABLE holdings ADD COLUMN is_starred TINYINT(1) NOT NULL DEFAULT 0 AFTER notes"
                         )
 
+                    _mysql_drop_columns_if_exist(
+                        cursor,
+                        "daily_metrics",
+                        [
+                            "composite_score",
+                            "rating",
+                            "score_breakdown",
+                            "score_details",
+                            "operation_suggestion",
+                        ],
+                    )
+                    _mysql_drop_columns_if_exist(
+                        cursor,
+                        "holding_analysis",
+                        ["composite_score"],
+                    )
+                    _mysql_drop_columns_if_exist(
+                        cursor,
+                        "daily_selections",
+                        ["composite_score"],
+                    )
+
                     dual_metric_columns = [
-                        ("entry_score", "INT NULL AFTER composite_score"),
+                        ("entry_score", "INT NULL AFTER volume_ratio"),
                         ("holding_score", "INT NULL AFTER entry_score"),
                         ("holding_state", "VARCHAR(32) NULL AFTER holding_score"),
                         (
@@ -518,7 +704,7 @@ def check_schema_updates():
                         ),
                         (
                             "entry_score_breakdown",
-                            "JSON NULL AFTER score_details",
+                            "JSON NULL AFTER pattern_flags",
                         ),
                         (
                             "entry_score_details",
@@ -545,8 +731,36 @@ def check_schema_updates():
                                 f"ALTER TABLE daily_metrics ADD COLUMN {column_name} {column_def}"
                             )
 
+                    daily_selection_columns = [
+                        ("entry_score", "INT NULL AFTER volume_ratio"),
+                        ("holding_score", "INT NULL AFTER entry_score"),
+                        ("holding_state", "VARCHAR(32) NULL AFTER holding_score"),
+                        (
+                            "holding_state_label",
+                            "VARCHAR(32) NULL AFTER holding_state",
+                        ),
+                    ]
+                    for column_name, column_def in daily_selection_columns:
+                        cursor.execute(
+                            f"SHOW COLUMNS FROM daily_selections LIKE '{column_name}'"
+                        )
+                        if not cursor.fetchone():
+                            print(
+                                f"⚙️ Migrating DB: Adding {column_name} column to daily_selections..."
+                            )
+                            cursor.execute(
+                                f"ALTER TABLE daily_selections ADD COLUMN {column_name} {column_def}"
+                            )
+
                     holding_analysis_columns = [
-                        ("snapshot_version", "INT NULL DEFAULT 1 AFTER composite_score"),
+                        ("entry_score", "INT NULL AFTER trend_signal"),
+                        ("holding_score", "INT NULL AFTER entry_score"),
+                        ("holding_state", "VARCHAR(32) NULL AFTER holding_score"),
+                        (
+                            "holding_state_label",
+                            "VARCHAR(32) NULL AFTER holding_state",
+                        ),
+                        ("snapshot_version", "INT NULL DEFAULT 1 AFTER holding_state_label"),
                         ("analysis_snapshot", "JSON NULL AFTER snapshot_version"),
                         ("final_action", "VARCHAR(20) NULL AFTER analysis_snapshot"),
                         ("risk_level", "VARCHAR(20) NULL AFTER final_action"),
@@ -691,14 +905,12 @@ def get_all_holdings(analysis_date: Optional[str] = None) -> List[Dict[str, Any]
         try:
             with conn.cursor() as cursor:
                 if analysis_date:
-                    # Default join with multi_agent analysis for scoring
                     sql = """
-                        SELECT h.*, ha.composite_score
+                        SELECT h.*, dm.entry_score, dm.holding_score, dm.holding_state, dm.holding_state_label
                         FROM holdings h
-                        LEFT JOIN holding_analysis ha
-                        ON h.symbol = ha.symbol
-                        AND ha.analysis_date = %s
-                        AND ha.mode = 'multi_agent'
+                        LEFT JOIN daily_metrics dm
+                        ON h.symbol = dm.symbol
+                        AND dm.date = %s
                         ORDER BY h.added_at DESC
                     """
                     cursor.execute(sql, (analysis_date,))
@@ -720,7 +932,10 @@ def get_all_holdings(analysis_date: Optional[str] = None) -> List[Dict[str, Any]
                     "is_starred": bool(row.get("is_starred", 0)),  # 收藏状态
                 }
                 if analysis_date:
-                    item["composite_score"] = row.get("composite_score")
+                    item["entry_score"] = row.get("entry_score")
+                    item["holding_score"] = row.get("holding_score")
+                    item["holding_state"] = row.get("holding_state")
+                    item["holding_state_label"] = row.get("holding_state_label")
 
                 result.append(item)
             return result
@@ -801,7 +1016,7 @@ def save_holding_analysis(
 ) -> bool:
     """
     Save or update daily analysis for a holding.
-    data dict should contain: price, ma20, trend_signal, composite_score, ai_analysis
+    data dict should contain: price, ma20, trend_signal, dual scores, ai_analysis
     """
     try:
         conn = get_connection()
@@ -819,14 +1034,18 @@ def save_holding_analysis(
 
                 sql = """
                 INSERT INTO holding_analysis
-                (symbol, analysis_date, mode, price, ma20, trend_signal, composite_score,
+                (symbol, analysis_date, mode, price, ma20, trend_signal,
+                 entry_score, holding_score, holding_state, holding_state_label,
                  snapshot_version, analysis_snapshot, final_action, risk_level, consensus_level, agent_outputs, ai_analysis)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON DUPLICATE KEY UPDATE
                 price = VALUES(price),
                 ma20 = VALUES(ma20),
                 trend_signal = VALUES(trend_signal),
-                composite_score = VALUES(composite_score),
+                entry_score = VALUES(entry_score),
+                holding_score = VALUES(holding_score),
+                holding_state = VALUES(holding_state),
+                holding_state_label = VALUES(holding_state_label),
                 snapshot_version = VALUES(snapshot_version),
                 analysis_snapshot = VALUES(analysis_snapshot),
                 final_action = VALUES(final_action),
@@ -845,7 +1064,10 @@ def save_holding_analysis(
                         data.get("price", 0),
                         data.get("ma20", 0),
                         data.get("trend_signal", ""),
-                        data.get("composite_score", 0),
+                        data.get("entry_score"),
+                        data.get("holding_score"),
+                        data.get("holding_state"),
+                        data.get("holding_state_label"),
                         data.get("snapshot_version", 1),
                         dump_json(data.get("analysis_snapshot")),
                         data.get("final_action"),
@@ -871,7 +1093,7 @@ def save_holding_analysis(
 def save_daily_selection(selection_date: str, selection_data: Dict[str, Any]) -> bool:
     """
     Save a daily selection result.
-    selection_data should contain: symbol, name, close_price, volume_ratio, composite_score, ai_analysis
+    selection_data should contain: symbol, name, close_price, volume_ratio, dual scores, ai_analysis
     """
     try:
         conn = get_connection()
@@ -879,12 +1101,16 @@ def save_daily_selection(selection_date: str, selection_data: Dict[str, Any]) ->
             with conn.cursor() as cursor:
                 sql = """
                 INSERT INTO daily_selections
-                (selection_date, symbol, name, close_price, volume_ratio, composite_score, ai_analysis)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                (selection_date, symbol, name, close_price, volume_ratio,
+                 entry_score, holding_score, holding_state, holding_state_label, ai_analysis)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON DUPLICATE KEY UPDATE
                 close_price = VALUES(close_price),
                 volume_ratio = VALUES(volume_ratio),
-                composite_score = VALUES(composite_score),
+                entry_score = VALUES(entry_score),
+                holding_score = VALUES(holding_score),
+                holding_state = VALUES(holding_state),
+                holding_state_label = VALUES(holding_state_label),
                 ai_analysis = VALUES(ai_analysis),
                 created_at = CURRENT_TIMESTAMP
                 """
@@ -896,7 +1122,10 @@ def save_daily_selection(selection_date: str, selection_data: Dict[str, Any]) ->
                         selection_data.get("name", ""),
                         selection_data.get("close_price", 0),
                         selection_data.get("volume_ratio", 0),
-                        selection_data.get("composite_score", 0),
+                        selection_data.get("entry_score"),
+                        selection_data.get("holding_score"),
+                        selection_data.get("holding_state"),
+                        selection_data.get("holding_state_label"),
                         selection_data.get("ai_analysis", ""),
                     ),
                 )
@@ -921,38 +1150,36 @@ def save_daily_metrics(date: str, metrics: Dict[str, Any]) -> bool:
         try:
             with conn.cursor() as cursor:
                 sql = """
-                INSERT INTO daily_metrics
-                (symbol, date, price, change_pct,
-                 ma5, ma20, ma60,
-                 rsi, kdj_k, kdj_d,
-                 macd_dif, macd_dea, macd_macd,
-                 volume_ratio, composite_score, entry_score, holding_score, holding_state, holding_state_label, rating, pattern_flags,
-                 score_breakdown, score_details, entry_score_breakdown, entry_score_details, holding_score_breakdown, holding_score_details, operation_suggestion,
-                 stop_loss_suggest, atr_pct, price_vs_high120)
-                VALUES (%s, %s, %s, %s,
-                        %s, %s, %s,
-                        %s, %s, %s,
-                        %s, %s, %s,
-                        %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s)
-                ON DUPLICATE KEY UPDATE
-                price=VALUES(price), change_pct=VALUES(change_pct),
-                ma5=VALUES(ma5), ma20=VALUES(ma20), ma60=VALUES(ma60),
-                rsi=VALUES(rsi), kdj_k=VALUES(kdj_k), kdj_d=VALUES(kdj_d),
-                macd_dif=VALUES(macd_dif), macd_dea=VALUES(macd_dea), macd_macd=VALUES(macd_macd),
-                volume_ratio=VALUES(volume_ratio), composite_score=VALUES(composite_score),
-                entry_score=VALUES(entry_score), holding_score=VALUES(holding_score),
-                holding_state=VALUES(holding_state), holding_state_label=VALUES(holding_state_label),
-                rating=VALUES(rating), pattern_flags=VALUES(pattern_flags),
-                score_breakdown=VALUES(score_breakdown), score_details=VALUES(score_details),
-                entry_score_breakdown=VALUES(entry_score_breakdown),
-                entry_score_details=VALUES(entry_score_details),
-                holding_score_breakdown=VALUES(holding_score_breakdown),
-                holding_score_details=VALUES(holding_score_details),
-                operation_suggestion=VALUES(operation_suggestion),
-                stop_loss_suggest=VALUES(stop_loss_suggest), atr_pct=VALUES(atr_pct),
-                price_vs_high120=VALUES(price_vs_high120)
+	                INSERT INTO daily_metrics
+	                (symbol, date, price, change_pct,
+	                 ma5, ma20, ma60,
+	                 rsi, kdj_k, kdj_d,
+	                 macd_dif, macd_dea, macd_macd,
+	                 volume_ratio, entry_score, holding_score, holding_state, holding_state_label, pattern_flags,
+	                 entry_score_breakdown, entry_score_details, holding_score_breakdown, holding_score_details,
+	                 stop_loss_suggest, atr_pct, price_vs_high120)
+	                VALUES (%s, %s, %s, %s,
+	                        %s, %s, %s,
+	                        %s, %s, %s,
+	                        %s, %s, %s,
+	                        %s, %s, %s, %s, %s, %s,
+	                        %s, %s, %s, %s,
+	                        %s, %s, %s)
+	                ON DUPLICATE KEY UPDATE
+	                price=VALUES(price), change_pct=VALUES(change_pct),
+	                ma5=VALUES(ma5), ma20=VALUES(ma20), ma60=VALUES(ma60),
+	                rsi=VALUES(rsi), kdj_k=VALUES(kdj_k), kdj_d=VALUES(kdj_d),
+	                macd_dif=VALUES(macd_dif), macd_dea=VALUES(macd_dea), macd_macd=VALUES(macd_macd),
+	                volume_ratio=VALUES(volume_ratio),
+	                entry_score=VALUES(entry_score), holding_score=VALUES(holding_score),
+	                holding_state=VALUES(holding_state), holding_state_label=VALUES(holding_state_label),
+	                pattern_flags=VALUES(pattern_flags),
+	                entry_score_breakdown=VALUES(entry_score_breakdown),
+	                entry_score_details=VALUES(entry_score_details),
+	                holding_score_breakdown=VALUES(holding_score_breakdown),
+	                holding_score_details=VALUES(holding_score_details),
+	                stop_loss_suggest=VALUES(stop_loss_suggest), atr_pct=VALUES(atr_pct),
+	                price_vs_high120=VALUES(price_vs_high120)
                 """
 
                 # Helper to dump JSON safely
@@ -1000,20 +1227,15 @@ def save_daily_metrics(date: str, metrics: Dict[str, Any]) -> bool:
                         safe_float(metrics.get("macd_dea")),
                         safe_float(metrics.get("macd_macd")),
                         safe_float(metrics.get("volume_ratio")),
-                        safe_float(metrics.get("composite_score")),
                         safe_float(metrics.get("entry_score")),
                         safe_float(metrics.get("holding_score")),
                         metrics.get("holding_state"),
                         metrics.get("holding_state_label"),
-                        metrics.get("rating", ""),
                         metrics.get("pattern_flags", ""),
-                        dump_json(metrics.get("score_breakdown")),
-                        dump_json(metrics.get("score_details")),
                         dump_json(metrics.get("entry_score_breakdown")),
                         dump_json(metrics.get("entry_score_details")),
                         dump_json(metrics.get("holding_score_breakdown")),
                         dump_json(metrics.get("holding_score_details")),
-                        metrics.get("operation_suggestion", ""),
                         safe_float(metrics.get("stop_loss_suggest")),
                         safe_float(metrics.get("atr_pct")),
                         safe_float(metrics.get("price_vs_high120")),
@@ -1046,7 +1268,6 @@ def get_all_daily_metrics(date: str) -> Dict[str, Dict[str, Any]]:
 
                 result = {}
                 for row in rows:
-                    # Parse JSON fields simply for completeness, though we mainly need composite_score
                     result[row["symbol"]] = row
 
                 return result
@@ -1106,8 +1327,6 @@ def get_daily_metrics(symbol: str, date: str) -> Optional[Dict[str, Any]]:
                     # Parse JSON fields if they exist as strings (depends on driver/mysql version)
                     # Pymysql with json might return dict or str
                     for field in [
-                        "score_breakdown",
-                        "score_details",
                         "entry_score_breakdown",
                         "entry_score_details",
                         "holding_score_breakdown",
@@ -1152,7 +1371,7 @@ def get_daily_analysis_by_date(analysis_date: str) -> List[Dict[str, Any]]:
                 FROM holding_analysis ha
                 JOIN holdings h ON ha.symbol = h.symbol
                 WHERE ha.analysis_date = %s
-                ORDER BY ha.composite_score ASC
+	                ORDER BY ha.holding_score ASC
                 """
                 cursor.execute(sql, (analysis_date,))
                 rows = cursor.fetchall()
@@ -1167,8 +1386,11 @@ def get_daily_analysis_by_date(analysis_date: str) -> List[Dict[str, Any]]:
                             "price": float(row["price"]) if row["price"] else 0,
                             "ma20": float(row["ma20"]) if row["ma20"] else 0,
                             "trend_signal": row["trend_signal"],
-                            "composite_score": row["composite_score"],
-                            "ai_analysis": row["ai_analysis"],
+	                            "entry_score": row.get("entry_score"),
+	                            "holding_score": row.get("holding_score"),
+	                            "holding_state": row.get("holding_state"),
+	                            "holding_state_label": row.get("holding_state_label"),
+	                            "ai_analysis": row["ai_analysis"],
                         }
                     )
                 return result
@@ -1219,8 +1441,11 @@ def get_holding_analysis(
                         "price": float(row["price"]) if row["price"] else 0,
                         "ma20": float(row["ma20"]) if row["ma20"] else 0,
                         "trend_signal": row["trend_signal"],
-                        "composite_score": row["composite_score"],
-                        "snapshot_version": row.get("snapshot_version", 1),
+	                        "entry_score": row.get("entry_score"),
+	                        "holding_score": row.get("holding_score"),
+	                        "holding_state": row.get("holding_state"),
+	                        "holding_state_label": row.get("holding_state_label"),
+	                        "snapshot_version": row.get("snapshot_version", 1),
                         "analysis_snapshot": row.get("analysis_snapshot"),
                         "final_action": row.get("final_action"),
                         "risk_level": row.get("risk_level"),
@@ -1289,8 +1514,11 @@ def get_daily_selection(
                         "volume_ratio": float(row["volume_ratio"])
                         if row["volume_ratio"]
                         else 0,
-                        "composite_score": row["composite_score"],
-                        "ai_analysis": row["ai_analysis"],
+	                        "entry_score": row.get("entry_score"),
+	                        "holding_score": row.get("holding_score"),
+	                        "holding_state": row.get("holding_state"),
+	                        "holding_state_label": row.get("holding_state_label"),
+	                        "ai_analysis": row["ai_analysis"],
                         "selection_date": _fmt_dt(row["selection_date"], "%Y-%m-%d"),
                         "created_at": _fmt_dt(row["created_at"], "%H:%M:%S")
                         if row.get("created_at")
@@ -1344,8 +1572,11 @@ def get_daily_selections(selection_date: Optional[str] = None) -> List[Dict[str,
                             "volume_ratio": float(row["volume_ratio"])
                             if row["volume_ratio"]
                             else 0,
-                            "composite_score": row["composite_score"],
-                            "ai_analysis": row["ai_analysis"],
+	                            "entry_score": row.get("entry_score"),
+	                            "holding_score": row.get("holding_score"),
+	                            "holding_state": row.get("holding_state"),
+	                            "holding_state_label": row.get("holding_state_label"),
+	                            "ai_analysis": row["ai_analysis"],
                             "selection_date": _fmt_dt(
                                 row["selection_date"], "%Y-%m-%d"
                             ),

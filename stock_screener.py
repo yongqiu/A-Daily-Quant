@@ -21,7 +21,7 @@ from data_fetcher_ts import fetch_stock_data_ts, fetch_daily_basic_ts
 from indicator_calc import calculate_indicators, get_latest_metrics
 from data_provider.base import DataFetcherManager
 from stock_scoring import get_score
-from dual_score import calculate_entry_score
+from scoring_pipeline import enrich_metrics_with_scores
 import json
 import os
 
@@ -396,11 +396,8 @@ def analyze_candidate(
             tech_data[key] = candidate[key]
             tech_data["__metadata__"][key] = candidate[key]
 
-    # 补充研究验证后的入场评分，用于候选筛选与排序。
-    entry_score, entry_breakdown, entry_reasons = calculate_entry_score(tech_data)
-    tech_data["entry_score"] = entry_score
-    tech_data["entry_score_breakdown"] = entry_breakdown
-    tech_data["entry_score_reasons"] = entry_reasons
+    # 重新应用双评分，确保合并后的实时粗筛指标参与候选排序。
+    tech_data = enrich_metrics_with_scores(tech_data)
 
     return tech_data
 
@@ -451,30 +448,18 @@ def print_detailed_metrics(metrics: Dict[str, Any]):
         print(
             "   [Result] "
             f"Entry Score: {metrics.get('entry_score')} | "
-            f"Legacy Score: {metrics.get('composite_score')} | "
-            f"Rating: {metrics.get('rating')} | "
-            f"Suggestion: {metrics.get('operation_suggestion')}"
+            f"Holding Score: {metrics.get('holding_score')} | "
+            f"Holding State: {metrics.get('holding_state_label') or metrics.get('holding_state')}"
         )
 
-        if "entry_score_reasons" in metrics and metrics["entry_score_reasons"]:
+        if "entry_score_details" in metrics and metrics["entry_score_details"]:
             print("   [Entry Reasons]")
-            for detail in metrics["entry_score_reasons"]:
+            for detail in metrics["entry_score_details"]:
                 print(f"     * {detail}")
 
-        if "score_breakdown" in metrics:
-            print(
-                "   [Breakdown] "
-                + " | ".join(
-                    [
-                        f"{item[0]}: {item[1]}/{item[2]}"
-                        for item in metrics["score_breakdown"]
-                    ]
-                )
-            )
-
-        if "score_details" in metrics:
-            print("   [Reasons]")
-            for detail in metrics["score_details"]:
+        if "holding_score_details" in metrics and metrics["holding_score_details"]:
+            print("   [Holding Reasons]")
+            for detail in metrics["holding_score_details"]:
                 print(f"     * {detail}")
 
         if "pattern_details" in metrics and metrics["pattern_details"]:
@@ -502,7 +487,6 @@ def run_deep_screen(
     if rules is None:
         rules = config.get("selection_rules", {})
 
-    legacy_min_score = rules.get("min_score", 70)
     entry_min_score = rules.get("entry_min_score", 75)
     max_entry_volume_ratio = rules.get("entry_max_volume_ratio", 3.0)
 
@@ -532,16 +516,11 @@ def run_deep_screen(
                 if vr > max_entry_volume_ratio:
                     continue
 
-                # 4. 旧综合评分只保留为兜底参考，避免极低质量样本穿透
-                if metrics.get("composite_score", 0) < legacy_min_score:
-                    continue
-
                 final_candidates.append(metrics)
                 print(
                     "  ✨ Found: "
                     f"{stock['name']} "
-                    f"(Entry Score: {metrics.get('entry_score')}, "
-                    f"Legacy Score: {metrics.get('composite_score')})"
+                    f"(Entry Score: {metrics.get('entry_score')})"
                 )
 
                 # 根据请求记录详细原因
@@ -550,9 +529,8 @@ def run_deep_screen(
             except Exception as e:
                 print(f"  ❌ Error processing {stock['symbol']}: {e}")
 
-    # 优先按入场评分排序，再用旧综合评分作为次排序键。
     final_candidates.sort(
-        key=lambda x: (x.get("entry_score", 0), x.get("composite_score", 0)),
+        key=lambda x: x.get("entry_score", 0),
         reverse=True,
     )
 
@@ -578,7 +556,7 @@ def run_stock_selection(config: Dict[str, Any]):
         return []
 
     print(
-        f"📋 Selection Criteria: Min Score > {rules.get('min_score')}, Max candidates: {rules.get('max_final_candidates')}"
+        f"📋 Selection Criteria: Entry Score > {rules.get('entry_min_score')}, Max candidates: {rules.get('max_final_candidates')}"
     )
 
     # 1. 市场环境检查（风险控制）

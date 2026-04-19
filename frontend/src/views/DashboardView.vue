@@ -123,9 +123,6 @@
                             <span v-if="stock.holding_state_label" class="text-[10px] px-1.5 py-[1px] rounded border border-border-subtle text-text-secondary">
                                 {{ stock.holding_state_label }}
                             </span>
-                            <span v-else-if="stock.composite_score" class="font-mono font-bold" :class="getScoreColor(stock.composite_score)">
-                                {{ stock.composite_score }}分
-                            </span>
                             <span v-else class="text-text-tertiary opacity-50 text-[10px]">-</span>
                         </div>
                         
@@ -159,7 +156,6 @@
                            <div class="flex flex-col gap-0.5 text-text-tertiary">
                                <span>
                                    <span v-if="stock.holding_score" class="font-bold mr-2" :class="getScoreColor(stock.holding_score)">H{{ stock.holding_score }}</span>
-                                   <span v-else-if="stock.composite_score" class="font-bold mr-2" :class="getScoreColor(stock.composite_score)">{{ stock.composite_score }}分</span>
                                    成本: {{ stock.cost_price > 0 ? stock.cost_price.toFixed(2) : '--' }}
                                </span>
                                <span v-if="stock.holding_state_label" class="text-[10px] text-text-secondary">{{ stock.holding_state_label }}</span>
@@ -235,9 +231,6 @@
                          <div class="w-16 text-right pr-2">
                              <span v-if="stock.holding_score" class="font-mono font-bold text-lg" :class="getScoreColor(stock.holding_score)">
                                  {{ stock.holding_score }}
-                             </span>
-                             <span v-else-if="stock.composite_score" class="font-mono font-bold text-lg" :class="getScoreColor(stock.composite_score)">
-                                 {{ stock.composite_score }}
                              </span>
                              <span v-else class="text-text-tertiary text-sm">--</span>
                          </div>
@@ -360,23 +353,8 @@
           
           <!-- 1. Top Section: Score Result (评分结果置顶) -->
           <div class="flex-shrink-0 px-4 pt-4 pb-2">
-             <div class="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-               <div class="text-[11px] font-semibold uppercase tracking-[0.24em] text-text-tertiary">
-                 评分模型
-               </div>
-               <div class="inline-flex w-full sm:w-auto rounded-xl border border-border-subtle bg-bg-elevated/60 p-1">
-                 <button
-                   v-for="mode in scoreModeOptions"
-                   :key="mode.value"
-                   @click="selectedScoreMode = mode.value"
-                   class="flex-1 sm:flex-none rounded-lg px-3 py-1.5 text-xs font-medium transition-all"
-                   :class="selectedScoreMode === mode.value
-                     ? 'bg-primary/15 text-primary border border-primary/20'
-                     : 'text-text-tertiary hover:text-text-secondary'"
-                 >
-                   {{ mode.label }}
-                 </button>
-               </div>
+             <div class="mb-3 text-[11px] font-semibold uppercase tracking-[0.24em] text-text-tertiary">
+               双评分
              </div>
 
              <!-- Case A: 已有评分结果 -->
@@ -385,7 +363,7 @@
                  :metrics="scoreResult"
                  :loading="calculatingScore"
                  :default-expanded="isScoreExpanded"
-                 primary-score-mode="holding"
+                 primary-score-kind="holding"
                  @refresh="runScoreCalculation"
              />
 
@@ -571,14 +549,6 @@ import {
 import { StarIcon as StarIconSolid } from '@heroicons/vue/24/solid'
 
 const marketStore = useMarketStore()
-const SCORE_MODE_STORAGE_KEY = 'stock-score-mode'
-const scoreModeOptions = [
-  { label: '原评分方式', value: 'legacy' },
-]
-
-const normalizeScoreMode = (mode) => {
-  return scoreModeOptions.some(option => option.value === mode) ? mode : 'legacy'
-}
 
 // State
 const selectedStockSymbol = ref(null)
@@ -588,7 +558,6 @@ const analyzing = ref(false)
 const calculatingScore = ref(false)
 const scoreResult = ref(null) // Stores the metrics result
 const isScoreExpanded = ref(false)
-const selectedScoreMode = ref(normalizeScoreMode(localStorage.getItem(SCORE_MODE_STORAGE_KEY)))
 const analysisProgress = ref('')
 const analysisResult = ref('')
 const analysisMeta = ref(null)
@@ -824,7 +793,7 @@ const getScoreColor = (score) => {
 const loadStockMetrics = async (symbol, date) => {
     if (!symbol) return
     try {
-        const response = await apiMethods.getStockMetrics(symbol, date, selectedScoreMode.value)
+        const response = await apiMethods.getStockMetrics(symbol, date)
         if (response.status === 'success') {
             scoreResult.value = response.data
         } else {
@@ -855,7 +824,6 @@ const runScoreCalculation = async () => {
     try {
         const res = await apiMethods.calculateStockScore(
           selectedStockSymbol.value,
-          selectedScoreMode.value,
           selectedAnalysisDate.value || getCurrentDateString()
         )
         if (res.status === 'success') {
@@ -1041,12 +1009,6 @@ watch(showKlineChart, async (newValue) => {
   }
 })
 
-watch(() => selectedScoreMode.value, (mode) => {
-  localStorage.setItem(SCORE_MODE_STORAGE_KEY, mode)
-  if (selectedStockSymbol.value) {
-    loadStockMetrics(selectedStockSymbol.value, selectedAnalysisDate.value || getCurrentDateString())
-  }
-})
 </script>
 
 <style scoped>

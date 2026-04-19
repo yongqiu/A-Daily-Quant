@@ -9,7 +9,7 @@ machine scoring, prompt building, persistence and UI all read the same facts.
 from typing import Any, Dict, Optional
 import logging
 
-from analysis_snapshot import flatten_snapshot_for_legacy
+from analysis_snapshot import flatten_snapshot
 from strategy_data_factory import StrategyDataFactory
 
 
@@ -21,7 +21,6 @@ def get_score(
     cost_price: float = 0.0,
     asset_type: str = "stock",
     include_news: bool = True,
-    score_mode: str = "legacy",
     trade_date: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """
@@ -49,9 +48,7 @@ def get_score(
         if not snapshot:
             return None
 
-        flattened = flatten_snapshot_for_legacy(snapshot)
-        flattened["score_mode"] = score_mode or "legacy"
-        flattened["score_mode_label"] = "双评分模式" if score_mode != "legacy" else "原评分方式"
+        flattened = flatten_snapshot(snapshot)
         flattened["snapshot"] = snapshot
         flattened["data_date"] = snapshot.get("trade_date")
 

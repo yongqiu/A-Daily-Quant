@@ -63,13 +63,13 @@ def derive_final_decision(
     snapshot: Dict[str, Any],
     agent_outputs: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    dual = snapshot.get("scores", {}).get("dual", {})
+    scores = snapshot.get("scores", {})
     hints = snapshot.get("decision_hints", {})
     agent_outputs = agent_outputs or []
 
-    entry_score = dual.get("entry_score", 0) or 0
-    holding_score = dual.get("holding_score", 0) or 0
-    holding_state = dual.get("holding_state", "")
+    entry_score = scores.get("entry_score", 0) or 0
+    holding_score = scores.get("holding_score", 0) or 0
+    holding_state = scores.get("holding_state", "")
 
     parsed = []
     actions = []

@@ -1,0 +1,18 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: a-daily-tradingagents
+    ports:
+      - "8100:8100"
+    environment:
+      DB_TYPE: sqlite
+      DB_FILE: /app/data/a_daily_quant.db
+      APP_HOST: 0.0.0.0
+      APP_PORT: 8100
+      APP_RELOAD: "false"
+    volumes:
+      - ./config.json:/app/config.json
+      - ./data:/app/data
+    restart: unless-stopped

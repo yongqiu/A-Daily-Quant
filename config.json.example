@@ -57,7 +57,7 @@
     "exclude_startup_board": true,
     "exclude_star_market": true,
     "max_candidates_rough": 100,
-    "min_score": 70,
+    "entry_min_score": 75,
     "max_final_candidates": 5
   }
 }

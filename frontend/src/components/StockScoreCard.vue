@@ -19,10 +19,6 @@
           </span>
           <span class="text-[10px] tracking-widest text-text-tertiary opacity-80">{{ secondaryHeaderText }}</span>
         </div>
-        <span v-if="metrics?.score_mode_label"
-              class="hidden sm:inline-flex px-2 py-1 rounded-full border border-primary/20 bg-primary/10 text-[10px] font-semibold tracking-wide text-primary">
-          {{ metrics?.score_mode_label }}
-        </span>
       </div>
       
       <!-- Right: Date & Refresh Action -->
@@ -38,11 +34,6 @@
       </div>
     </div>
 
-        <div v-if="metrics?.score_mode_note"
-         class="px-4 py-2 text-[11px] text-text-secondary border-b border-border-subtle bg-bg-elevated/20">
-      {{ metrics?.score_mode_note }}
-    </div>
-
     <!-- Score Details (Expandable) -->
     <div v-show="isExpanded" class="p-4 grid grid-cols-1 md:grid-cols-2 gap-8 bg-bg-card/20 transition-all duration-300">
       <!-- Left: Score Breakdown -->
@@ -51,7 +42,7 @@
           📊 评分明细
         </h4>
         <div class="space-y-3">
-          <div v-for="(item, index) in metrics?.score_breakdown" :key="index" class="flex flex-col gap-1">
+          <div v-for="(item, index) in activeBreakdown" :key="index" class="flex flex-col gap-1">
             <div class="flex justify-between text-xs">
               <span class="text-text-secondary font-medium">{{ item[0] }}</span>
               <span class="font-mono text-text-tertiary">{{ item[1] }}/{{ item[2] }}</span>
@@ -96,11 +87,6 @@
               </div>
             </div>
           </div>
-        </div>
-
-        <div v-if="metrics?.composite_score && primaryScoreMode !== 'legacy'" class="mb-5 rounded-lg border border-border-subtle bg-bg-elevated/20 px-3 py-2 text-[11px] text-text-secondary">
-          旧评分参考：<span class="font-mono font-semibold" :class="getScoreColor(metrics?.composite_score)">{{ metrics?.composite_score }}</span>
-          <span v-if="metrics?.rating" class="ml-2">{{ metrics?.rating }}</span>
         </div>
 
         <h4 class="text-xs font-bold text-text-tertiary uppercase tracking-wider mb-3 flex items-center gap-1">
@@ -150,11 +136,6 @@
       </div>
     </div>
     
-    <!-- Suggestion Footer -->
-    <div v-if="metrics?.operation_suggestion && isExpanded" class="px-5 py-3 bg-primary/5 border-t border-primary/10 text-xs text-primary flex items-start gap-2.5">
-      <span class="mt-0.5 text-base">💡</span>
-      <span class="leading-relaxed font-medium">{{ metrics?.operation_suggestion }}</span>
-    </div>
   </div>
 </template>
 
@@ -182,9 +163,9 @@ const props = defineProps({
       type: Boolean,
       default: false
   },
-  primaryScoreMode: {
+  primaryScoreKind: {
       type: String,
-      default: 'legacy'
+      default: 'entry'
   }
 })
 
@@ -203,31 +184,36 @@ const toggleExpanded = () => {
 
 const primaryScoreValue = computed(() => {
     if (!props.metrics) return null
-    if (props.primaryScoreMode === 'entry') return props.metrics.entry_score ?? props.metrics.composite_score
-    if (props.primaryScoreMode === 'holding') return props.metrics.holding_score ?? props.metrics.composite_score
-    return props.metrics.composite_score
+    if (props.primaryScoreKind === 'holding') return props.metrics.holding_score
+    return props.metrics.entry_score
 })
 
 const primaryScoreLabel = computed(() => {
-    if (props.primaryScoreMode === 'entry') return '入场评分'
-    if (props.primaryScoreMode === 'holding') return '持仓评分'
-    return '旧评分'
+    if (props.primaryScoreKind === 'entry') return '入场评分'
+    if (props.primaryScoreKind === 'holding') return '持仓评分'
+    return '入场评分'
 })
 
 const primaryScoreTag = computed(() => {
-    if (props.primaryScoreMode === 'entry') return '候选排序'
-    if (props.primaryScoreMode === 'holding') return props.metrics?.holding_state_label || '持仓状态'
-    return props.metrics?.rating?.split(' ')[0] || '原评分方式'
+    if (props.primaryScoreKind === 'entry') return '候选排序'
+    if (props.primaryScoreKind === 'holding') return props.metrics?.holding_state_label || '持仓状态'
+    return '双评分'
 })
 
 const secondaryHeaderText = computed(() => {
-    if (props.primaryScoreMode === 'entry') {
-        return summarizeReasons(props.metrics?.entry_score_details, props.metrics?.entry_score, 'entry') || (props.metrics?.rating || '原评分方式')
+    if (props.primaryScoreKind === 'entry') {
+        return summarizeReasons(props.metrics?.entry_score_details, props.metrics?.entry_score, 'entry') || '用于候选筛选与排序'
     }
-    if (props.primaryScoreMode === 'holding') {
-        return summarizeReasons(props.metrics?.holding_score_details, props.metrics?.holding_score, 'holding') || (props.metrics?.rating || '原评分方式')
+    if (props.primaryScoreKind === 'holding') {
+        return summarizeReasons(props.metrics?.holding_score_details, props.metrics?.holding_score, 'holding') || '用于持仓状态判断'
     }
-    return props.metrics?.rating?.split(' ').slice(1).join(' ') || '🟢🟢🟢'
+    return '双评分'
+})
+
+const activeBreakdown = computed(() => {
+    if (!props.metrics) return []
+    if (props.primaryScoreKind === 'holding') return props.metrics.holding_score_breakdown || []
+    return props.metrics.entry_score_breakdown || []
 })
 
 // Helpers

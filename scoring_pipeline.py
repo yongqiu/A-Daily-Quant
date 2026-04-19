@@ -36,13 +36,7 @@ def build_score_views(metrics: Dict[str, Any]) -> Dict[str, Any]:
     holding_score, holding_breakdown, holding_reasons = calculate_holding_score(metrics)
     holding_state = classify_holding_state(holding_score)
 
-    legacy = {
-        "composite_score": metrics.get("composite_score", 0),
-        "rating": metrics.get("rating", ""),
-        "score_breakdown": metrics.get("score_breakdown", []),
-        "score_details": metrics.get("score_details", []),
-    }
-    dual = {
+    return {
         "entry_score": entry_score,
         "entry_score_breakdown": _format_dual_score_breakdown(
             entry_breakdown,
@@ -75,19 +69,11 @@ def build_score_views(metrics: Dict[str, Any]) -> Dict[str, Any]:
             "EXIT": "退出",
         }.get(holding_state, holding_state),
     }
-    return {"legacy": legacy, "dual": dual}
 
 
 def enrich_metrics_with_scores(metrics: Dict[str, Any]) -> Dict[str, Any]:
     metrics = deepcopy(metrics)
-    score_views = build_score_views(metrics)
-    legacy = score_views["legacy"]
-    dual = score_views["dual"]
-    metrics["composite_score"] = legacy["composite_score"]
-    metrics["rating"] = legacy["rating"]
-    metrics["score_breakdown"] = legacy["score_breakdown"]
-    metrics["score_details"] = legacy["score_details"]
-    metrics.update(dual)
+    metrics.update(build_score_views(metrics))
     return metrics
 
 

@@ -3,7 +3,7 @@ from typing import Dict, Any, Optional
 from datetime import datetime
 import json
 
-from analysis_snapshot import build_analysis_snapshot, flatten_snapshot_for_legacy
+from analysis_snapshot import build_analysis_snapshot, flatten_snapshot
 from context_builder import build_strategy_context
 from scoring_pipeline import attach_scores_to_snapshot
 
@@ -89,11 +89,6 @@ class StrategyDataFactory:
         )
         tech_data = get_latest_metrics(df, cost_price=stock_info.get("cost_price"))
         if tech_data:
-            if asset_type == "etf":
-                from etf_score import apply_etf_score
-
-                tech_data = apply_etf_score(tech_data)
-
             cls._set_to_cache(symbol, "tech_data", tech_data)
             return tech_data
         return {}
@@ -223,7 +218,7 @@ class StrategyDataFactory:
             )
         )
 
-        tech_view = flatten_snapshot_for_legacy(snapshot)
+        tech_view = flatten_snapshot(snapshot)
 
         ctx = build_strategy_context(
             stock_info=stock_info,
@@ -338,6 +333,16 @@ class StrategyDataFactory:
                     extra_indicators["eps"] = fina.get("eps", "N/A")
                     extra_indicators["bvps"] = fina.get("bps", "N/A")
                     extra_indicators["roe"] = fina.get("roe", "N/A")
+                    extra_indicators["report_end_date"] = fina.get("end_date", "N/A")
+                    extra_indicators["revenue_yoy"] = fina.get("q_sales_yoy", "N/A")
+                    extra_indicators["profit_yoy"] = fina.get("q_dtprofit_yoy", "N/A")
+                    extra_indicators["ocfps"] = fina.get("ocfps", "N/A")
+                    extra_indicators["grossprofit_margin"] = fina.get(
+                        "grossprofit_margin", "N/A"
+                    )
+                    extra_indicators["debt_to_assets"] = fina.get(
+                        "debt_to_assets", "N/A"
+                    )
 
                 if "factors" in locals() and factors:
                     pe = factors.get("pe_ttm") or factors.get("pe", "N/A")

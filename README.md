@@ -50,7 +50,7 @@
   - 持仓列表按 `holding_score` 和风险状态排序
   - 支持查看评分卡、AI 分析、结构化决策摘要
 - Screener
-  - 候选股按 `entry_score` 和旧综合分排序
+  - 候选股按 `entry_score` 排序
   - 支持查看详情、刷新评分、生成分析报告
 - 分析流
   - 支持单专家分析
@@ -117,6 +117,33 @@ python start.py
 http://127.0.0.1:8100
 ```
 
+### 5. 使用 Docker 启动
+
+先准备配置文件：
+
+```bash
+cp config.json.example config.json
+mkdir -p data
+```
+
+再用 Docker Compose 启动：
+
+```bash
+docker compose up --build
+```
+
+启动后访问：
+
+```text
+http://127.0.0.1:8100
+```
+
+说明：
+
+- 容器内默认使用 SQLite，数据库文件挂载在 `./data/a_daily_quant.db`
+- `config.json` 会被挂载进容器，因此建议在宿主机直接维护
+- 容器启动时仍然执行 `python start.py`，但服务会监听 `0.0.0.0:8100` 以便宿主机访问
+
 ## 开发方式
 
 如果只使用内置前端静态资源，直接运行：
@@ -143,7 +170,6 @@ python web_server.py
 
 - 默认数据库为 SQLite
 - `daily_metrics` 会保存每日评分结果，包括：
-  - `composite_score`
   - `entry_score`
   - `holding_score`
   - `holding_state`

@@ -55,3 +55,8 @@ scripts
 *.db
 llm_analyst_refactored.py
 llm_analyst_refactored_v2.py
+snapshots
+outputs
+
+
+backtester

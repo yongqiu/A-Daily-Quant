@@ -156,8 +156,10 @@ def build_strategy_context(
         sup = price * 0.9
 
     # 3. 优势形态
-    details = tech_data.get("score_details", [])
-    strengths = [d.replace("✅ ", "") for d in details if "✅" in d]
+    details = tech_data.get("entry_score_details", []) or tech_data.get(
+        "holding_score_details", []
+    )
+    strengths = [str(d).replace("✅ ", "") for d in details if "✅" in str(d)]
     strength_str = ", ".join(strengths[:3]) if strengths else "暂无明显优势"
     pattern_str = ", ".join(tech_data.get("pattern_details", [])) or "无明显形态"
 
@@ -195,6 +197,12 @@ def build_strategy_context(
     roe = extra_indicators.get("roe", realtime_data.get("roe", "N/A"))
     total_mv = extra_indicators.get("total_mv", realtime_data.get("total_mv", "N/A"))
     eps = extra_indicators.get("eps", realtime_data.get("eps", "N/A"))
+    report_end_date = extra_indicators.get("report_end_date", "N/A")
+    revenue_yoy = extra_indicators.get("revenue_yoy", "N/A")
+    profit_yoy = extra_indicators.get("profit_yoy", "N/A")
+    ocfps = extra_indicators.get("ocfps", "N/A")
+    grossprofit_margin = extra_indicators.get("grossprofit_margin", "N/A")
+    debt_to_assets = extra_indicators.get("debt_to_assets", "N/A")
 
     # 7. 量价指标
     try:
@@ -235,6 +243,12 @@ def build_strategy_context(
             "bvps": bvps,
             "eps": eps,
             "total_mv": total_mv,
+            "report_end_date": report_end_date,
+            "revenue_yoy": revenue_yoy,
+            "profit_yoy": profit_yoy,
+            "ocfps": ocfps,
+            "grossprofit_margin": grossprofit_margin,
+            "debt_to_assets": debt_to_assets,
         },
         "computed": {
             "ma5_position": ma5_pos,
